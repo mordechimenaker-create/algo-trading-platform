@@ -1,0 +1,547 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Algo Trading SaaS</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    :root {
+      --bg: #f7fbff;
+      --ink: #111827;
+      --muted: #6b7280;
+      --card: #ffffff;
+      --line: #e5e7eb;
+      --brand: #0f766e;
+      --brand2: #0369a1;
+      --warn: #b45309;
+      --ok: #166534;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+      background: radial-gradient(1200px 600px at 10% -10%, #dff6ff, transparent),
+                  radial-gradient(900px 500px at 95% 0%, #dffae8, transparent),
+                  var(--bg);
+    }
+    .wrap { max-width: 1160px; margin: 0 auto; padding: 18px; }
+    .top {
+      display: grid;
+      grid-template-columns: 1.2fr .8fr;
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 14px;
+    }
+    .title { margin: 0; font-size: 1.4rem; }
+    .muted { color: var(--muted); }
+    .row4 {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0,1fr));
+      gap: 10px;
+      margin-bottom: 12px;
+    }
+    .stat h4 { margin: 0 0 6px; color: var(--muted); font-size: .83rem; }
+    .stat p { margin: 0; font-size: 1.18rem; font-weight: 700; }
+    .tabs { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
+    .tabs button {
+      width: auto;
+      border: 1px solid var(--line);
+      background: #fff;
+      border-radius: 999px;
+      padding: 8px 13px;
+      cursor: pointer;
+    }
+    .tabs button.active { background: var(--brand); border-color: var(--brand); color: #fff; }
+    .panel { display: none; }
+    .panel.active { display: block; }
+    .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .grid3 { display: grid; grid-template-columns: repeat(3,1fr); gap: 10px; }
+    label { display: block; font-size: .86rem; margin-bottom: 4px; font-weight: 700; }
+    input, textarea, select, button {
+      width: 100%;
+      padding: 10px 11px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      font: inherit;
+    }
+    textarea { min-height: 155px; resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    button.primary { background: var(--brand2); color: #fff; border: none; cursor: pointer; }
+    button.alt { background: var(--brand); color: #fff; border: none; cursor: pointer; }
+    .list { max-height: 320px; overflow: auto; border: 1px solid var(--line); border-radius: 10px; }
+    .item { padding: 10px; border-bottom: 1px solid var(--line); }
+    .item:last-child { border-bottom: none; }
+    .mono {
+      white-space: pre-wrap;
+      background: #0b1220;
+      color: #dbeafe;
+      border-radius: 10px;
+      padding: 10px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: .84rem;
+    }
+    .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: .8rem; font-weight: 700; }
+    .pill.free { background: #fef3c7; color: #92400e; }
+    .pill.pro { background: #dbeafe; color: #1d4ed8; }
+    .pill.enterprise { background: #dcfce7; color: #166534; }
+    .auth-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .price { border: 1px solid var(--line); border-radius: 10px; padding: 10px; }
+    .price h4 { margin: 0 0 4px; }
+    .ok { color: var(--ok); }
+    .warn { color: var(--warn); }
+    @media (max-width: 940px) {
+      .top, .row4, .grid2, .grid3, .auth-grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="top">
+      <div class="card">
+        <h1 class="title">Algo Trading SaaS Console</h1>
+        <div class="muted">JWT Auth + Real Stripe Billing + plan-based limits</div>
+        <div id="sessionText" style="margin-top:8px" class="warn">Not signed in</div>
+      </div>
+      <div class="card">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
+          <div>
+            <div class="muted" style="font-size:.85rem">Current Plan</div>
+            <div id="planBadge" class="pill free">free</div>
+          </div>
+          <div class="muted" id="clock">-</div>
+        </div>
+        <div style="margin-top:8px" class="muted" id="limitsText">Sign in to see usage limits.</div>
+      </div>
+    </div>
+
+    <div class="row4">
+      <div class="card stat"><h4>AAPL</h4><p id="sAAPL">-</p></div>
+      <div class="card stat"><h4>GOOGL</h4><p id="sGOOGL">-</p></div>
+      <div class="card stat"><h4>MSFT</h4><p id="sMSFT">-</p></div>
+      <div class="card stat"><h4>AMZN</h4><p id="sAMZN">-</p></div>
+    </div>
+
+    <div class="tabs">
+      <button class="active" data-tab="auth">Auth & Billing</button>
+      <button data-tab="strategies">Strategies</button>
+      <button data-tab="backtest">Backtest</button>
+      <button data-tab="orders">Orders</button>
+      <button data-tab="live">Live Feed</button>
+    </div>
+
+    <section class="panel active" id="auth">
+      <div class="grid2">
+        <div class="card">
+          <h3 style="margin-top:0">Login</h3>
+          <div class="auth-grid">
+            <div>
+              <label>Email</label>
+              <input id="loginEmail" type="email" placeholder="demo@algo.local" />
+            </div>
+            <div>
+              <label>Password</label>
+              <input id="loginPass" type="password" placeholder="demo12345" />
+            </div>
+          </div>
+          <button class="primary" id="btnLogin" style="margin-top:10px">Login</button>
+          <div class="muted" style="margin-top:7px">Demo user: <code>demo@algo.local / demo12345</code></div>
+        </div>
+
+        <div class="card">
+          <h3 style="margin-top:0">Signup</h3>
+          <div class="auth-grid">
+            <div>
+              <label>Username</label>
+              <input id="signUser" placeholder="mytrader" />
+            </div>
+            <div>
+              <label>Email</label>
+              <input id="signEmail" type="email" placeholder="you@example.com" />
+            </div>
+          </div>
+          <label style="margin-top:8px">Password</label>
+          <input id="signPass" type="password" placeholder="min 8 chars" />
+          <button class="alt" id="btnSignup" style="margin-top:10px">Create Account</button>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:12px">
+        <h3 style="margin-top:0">Subscription Plans</h3>
+        <div class="grid3">
+          <div class="price"><h4>Free</h4><div class="muted">Up to 3 strategies, 5 backtests/day</div><button data-plan="free" class="planBtn">Downgrade to Free</button></div>
+          <div class="price"><h4>Pro</h4><div class="muted">Up to 25 strategies, 100 backtests/day</div><button data-plan="pro" class="planBtn">Checkout Pro</button></div>
+          <div class="price"><h4>Enterprise</h4><div class="muted">High limits</div><button data-plan="enterprise" class="planBtn">Checkout Enterprise</button></div>
+        </div>
+        <div class="grid2" style="margin-top:10px">
+          <button id="btnPortal">Open Billing Portal</button>
+          <button id="btnLogout">Logout</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel" id="strategies">
+      <div class="grid2">
+        <div class="card">
+          <label>Name</label><input id="stName" placeholder="Simple Dip Buyer" />
+          <label style="margin-top:8px">Description</label><input id="stDesc" placeholder="Buy dips under threshold" />
+          <label style="margin-top:8px">Symbol</label><input id="stSymbol" value="AAPL" />
+          <label style="margin-top:8px">Code</label>
+          <textarea id="stCode">if (data.close < 150) {
+  executeOrder('BUY', 5, data.close);
+} else if (data.close > 155) {
+  executeOrder('SELL', 5, data.close);
+}</textarea>
+          <button class="primary" id="btnSaveStrategy" style="margin-top:8px">Save Strategy</button>
+        </div>
+        <div class="card">
+          <div style="display:flex;justify-content:space-between;align-items:center;">
+            <h3 style="margin:0">My Strategies</h3>
+            <button id="btnRefreshStrategies" style="width:auto">Refresh</button>
+          </div>
+          <div class="list" id="strategyList" style="margin-top:8px"></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel" id="backtest">
+      <div class="grid2">
+        <div class="card">
+          <label>Strategy</label><select id="btStrategy"></select>
+          <label style="margin-top:8px">Days</label><input type="number" min="1" value="30" id="btDays" />
+          <button class="primary" id="btnRunBacktest" style="margin-top:8px">Run Backtest</button>
+          <div class="mono" id="btOutput" style="margin-top:8px">No backtest yet.</div>
+        </div>
+        <div class="card"><canvas id="equityChart"></canvas></div>
+      </div>
+    </section>
+
+    <section class="panel" id="orders">
+      <div class="grid2">
+        <div class="card">
+          <label>Symbol</label><input id="odSymbol" value="AAPL" />
+          <label style="margin-top:8px">Side</label>
+          <select id="odSide"><option>BUY</option><option>SELL</option></select>
+          <label style="margin-top:8px">Quantity</label><input id="odQty" type="number" value="10" />
+          <label style="margin-top:8px">Price</label><input id="odPrice" type="number" step="0.01" value="150" />
+          <button class="primary" id="btnPlaceOrder" style="margin-top:8px">Place Order</button>
+        </div>
+        <div class="card">
+          <div style="display:flex;justify-content:space-between;align-items:center;">
+            <h3 style="margin:0">My Orders</h3>
+            <button id="btnRefreshOrders" style="width:auto">Refresh</button>
+          </div>
+          <div class="list" id="orderList" style="margin-top:8px"></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel" id="live">
+      <div class="card">
+        <div class="mono" id="liveLog">Waiting for price stream...</div>
+      </div>
+    </section>
+  </div>
+
+<script>
+const api = '/api';
+const state = {
+  token: localStorage.getItem('token') || '',
+  user: null,
+  strategies: [],
+  chart: null
+};
+const limitsByPlan = {
+  free: { strategies: 3, backtestsPerDay: 5 },
+  pro: { strategies: 25, backtestsPerDay: 100 },
+  enterprise: { strategies: 'High', backtestsPerDay: 'High' }
+};
+
+function el(id){ return document.getElementById(id); }
+function money(v){ return Number(v).toFixed(2); }
+function toast(msg){ alert(msg); }
+
+function setClock(){ el('clock').textContent = new Date().toLocaleString(); }
+setClock(); setInterval(setClock, 1000);
+
+function setTab(id){
+  document.querySelectorAll('.tabs button').forEach(b => b.classList.toggle('active', b.dataset.tab === id));
+  document.querySelectorAll('.panel').forEach(p => p.classList.toggle('active', p.id === id));
+}
+document.querySelectorAll('.tabs button').forEach(b => b.onclick = () => setTab(b.dataset.tab));
+
+async function apiFetch(path, options = {}) {
+  const headers = { 'Content-Type': 'application/json', ...(options.headers || {}) };
+  if (state.token) headers.Authorization = `Bearer ${state.token}`;
+  const res = await fetch(`${api}${path}`, { ...options, headers });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+  return data;
+}
+
+function applySessionUI() {
+  if (!state.user) {
+    el('sessionText').textContent = 'Not signed in';
+    el('sessionText').className = 'warn';
+    el('planBadge').textContent = 'free';
+    el('planBadge').className = 'pill free';
+    el('limitsText').textContent = 'Sign in to see usage limits.';
+    return;
+  }
+
+  const plan = state.user.plan || 'free';
+  const limits = limitsByPlan[plan] || limitsByPlan.free;
+  const subStatus = state.user.stripe_subscription_status || 'inactive';
+  el('sessionText').textContent = `Signed in as ${state.user.username} (${state.user.email})`;
+  el('sessionText').className = 'ok';
+  el('planBadge').textContent = plan;
+  el('planBadge').className = `pill ${plan}`;
+  el('limitsText').textContent = `Subscription status: ${subStatus}. Limits: ${limits.strategies} strategies, ${limits.backtestsPerDay} backtests/day`;
+}
+
+async function refreshMe() {
+  if (!state.token) {
+    state.user = null;
+    applySessionUI();
+    return;
+  }
+  try {
+    state.user = await apiFetch('/auth/me', { method: 'GET' });
+  } catch (_e) {
+    state.token = '';
+    state.user = null;
+    localStorage.removeItem('token');
+  }
+  applySessionUI();
+}
+
+async function login() {
+  try {
+    const email = el('loginEmail').value.trim();
+    const password = el('loginPass').value;
+    const data = await apiFetch('/auth/login', { method: 'POST', body: JSON.stringify({ email, password }) });
+    state.token = data.token;
+    localStorage.setItem('token', state.token);
+    await refreshMe();
+    await loadStrategies();
+    await loadOrders();
+    toast('Logged in');
+  } catch (e) {
+    toast(e.message);
+  }
+}
+
+async function signup() {
+  try {
+    const username = el('signUser').value.trim();
+    const email = el('signEmail').value.trim();
+    const password = el('signPass').value;
+    const data = await apiFetch('/auth/signup', { method: 'POST', body: JSON.stringify({ username, email, password }) });
+    state.token = data.token;
+    localStorage.setItem('token', state.token);
+    await refreshMe();
+    await loadStrategies();
+    await loadOrders();
+    toast('Account created');
+  } catch (e) {
+    toast(e.message);
+  }
+}
+
+function logout() {
+  state.token = '';
+  state.user = null;
+  localStorage.removeItem('token');
+  applySessionUI();
+  el('strategyList').innerHTML = '';
+  el('orderList').innerHTML = '';
+  el('btStrategy').innerHTML = '';
+  toast('Logged out');
+}
+
+async function changePlan(plan) {
+  try {
+    if (!state.token) throw new Error('Login first');
+
+    if (plan === 'free') {
+      const data = await apiFetch('/billing/subscribe', { method: 'POST', body: JSON.stringify({ plan: 'free' }) });
+      state.token = data.token;
+      localStorage.setItem('token', state.token);
+      await refreshMe();
+      toast('Downgraded to free');
+      return;
+    }
+
+    const data = await apiFetch('/billing/checkout-session', {
+      method: 'POST',
+      body: JSON.stringify({
+        plan,
+        success_url: `${window.location.origin}/?billing=success`,
+        cancel_url: `${window.location.origin}/?billing=cancel`
+      })
+    });
+
+    if (!data.url) throw new Error('Checkout URL missing');
+    window.location.href = data.url;
+  } catch (e) {
+    toast(e.message);
+  }
+}
+
+async function openBillingPortal() {
+  try {
+    if (!state.token) throw new Error('Login first');
+    const data = await apiFetch('/billing/portal-session', {
+      method: 'POST',
+      body: JSON.stringify({ return_url: `${window.location.origin}/` })
+    });
+    if (!data.url) throw new Error('Portal URL missing');
+    window.location.href = data.url;
+  } catch (e) {
+    toast(e.message);
+  }
+}
+
+async function loadStrategies() {
+  if (!state.token) return;
+  try {
+    state.strategies = await apiFetch('/strategies', { method: 'GET' });
+    const list = el('strategyList');
+    const sel = el('btStrategy');
+    list.innerHTML = '';
+    sel.innerHTML = '';
+
+    state.strategies.forEach(s => {
+      const d = document.createElement('div');
+      d.className = 'item';
+      d.innerHTML = `<strong>${s.name}</strong> <span class="muted">(${s.symbol})</span><div class="muted">${s.description || ''}</div>`;
+      list.appendChild(d);
+
+      const o = document.createElement('option');
+      o.value = s.id;
+      o.textContent = `#${s.id} ${s.name}`;
+      sel.appendChild(o);
+    });
+  } catch (e) {
+    toast(e.message);
+  }
+}
+
+async function saveStrategy() {
+  try {
+    if (!state.token) throw new Error('Login first');
+    const payload = {
+      name: el('stName').value.trim(),
+      description: el('stDesc').value.trim(),
+      symbol: el('stSymbol').value.trim() || 'AAPL',
+      code: el('stCode').value
+    };
+    await apiFetch('/strategies', { method: 'POST', body: JSON.stringify(payload) });
+    await loadStrategies();
+    toast('Strategy saved');
+  } catch (e) {
+    toast(e.message);
+  }
+}
+
+function drawEquity(equity) {
+  const labels = equity.map(x => new Date(x.timestamp).toLocaleDateString());
+  const values = equity.map(x => x.value);
+  const ctx = el('equityChart');
+  if (state.chart) state.chart.destroy();
+  state.chart = new Chart(ctx, {
+    type: 'line',
+    data: { labels, datasets: [{ label: 'Equity', data: values, borderColor: '#0369a1', pointRadius: 0, tension: .2 }] },
+    options: { responsive: true, scales: { x: { display: false } } }
+  });
+}
+
+async function runBacktest() {
+  try {
+    if (!state.token) throw new Error('Login first');
+    const strategy_id = Number(el('btStrategy').value);
+    const days = Number(el('btDays').value || 30);
+    const data = await apiFetch('/backtest', { method: 'POST', body: JSON.stringify({ strategy_id, days }) });
+    el('btOutput').textContent = JSON.stringify(data, null, 2);
+    if (data.equity) drawEquity(data.equity);
+  } catch (e) {
+    toast(e.message);
+  }
+}
+
+async function placeOrder() {
+  try {
+    if (!state.token) throw new Error('Login first');
+    const payload = {
+      symbol: el('odSymbol').value.trim() || 'AAPL',
+      side: el('odSide').value,
+      quantity: Number(el('odQty').value || 1),
+      price: Number(el('odPrice').value || 0)
+    };
+    await apiFetch('/orders', { method: 'POST', body: JSON.stringify(payload) });
+    await loadOrders();
+    toast('Order placed');
+  } catch (e) {
+    toast(e.message);
+  }
+}
+
+async function loadOrders() {
+  if (!state.token) return;
+  try {
+    const orders = await apiFetch('/orders', { method: 'GET' });
+    const list = el('orderList');
+    list.innerHTML = '';
+    orders.forEach(o => {
+      const d = document.createElement('div');
+      d.className = 'item';
+      d.innerHTML = `<strong>${o.side}</strong> ${o.quantity} ${o.symbol} @ ${money(o.price)} <span class="muted">${o.status}</span>`;
+      list.appendChild(d);
+    });
+  } catch (e) {
+    toast(e.message);
+  }
+}
+
+function startSocket() {
+  const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
+  const ws = new WebSocket(`${wsProto}://${location.host}`);
+  ws.onmessage = (event) => {
+    const msg = JSON.parse(event.data);
+    if (msg.type !== 'price_update') return;
+
+    ['AAPL', 'GOOGL', 'MSFT', 'AMZN'].forEach(s => {
+      if (msg.prices[s] != null) el('s' + s).textContent = money(msg.prices[s]);
+    });
+
+    const line = `[${new Date(msg.timestamp).toLocaleTimeString()}] ${Object.entries(msg.prices).map(([k,v]) => `${k}:${money(v)}`).join(' | ')}`;
+    const log = el('liveLog');
+    log.textContent = line + '\n' + log.textContent.split('\n').slice(0, 30).join('\n');
+  };
+}
+
+el('btnLogin').onclick = login;
+el('btnSignup').onclick = signup;
+el('btnLogout').onclick = logout;
+el('btnPortal').onclick = openBillingPortal;
+el('btnSaveStrategy').onclick = saveStrategy;
+el('btnRefreshStrategies').onclick = loadStrategies;
+el('btnRunBacktest').onclick = runBacktest;
+el('btnPlaceOrder').onclick = placeOrder;
+el('btnRefreshOrders').onclick = loadOrders;
+document.querySelectorAll('.planBtn').forEach(b => b.onclick = () => changePlan(b.dataset.plan));
+
+(async function init(){
+  await refreshMe();
+  await loadStrategies();
+  await loadOrders();
+  startSocket();
+})();
+</script>
+</body>
+</html>
