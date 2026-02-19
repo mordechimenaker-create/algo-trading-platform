@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  backend-quality:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install backend dependencies
+        run: npm install --prefix backend
+
+      - name: Syntax check backend
+        run: |
+          node --check backend/server.js
+          node --check backend/backtest.js
+
+      - name: Validate compose files
+        run: |
+          docker compose -f docker-compose.yml config
+          docker compose -f docker-compose.prod.yml config

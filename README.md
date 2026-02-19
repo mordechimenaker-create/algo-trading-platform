@@ -98,6 +98,30 @@ See `docs/DEPLOYMENT.md` for:
 - Managed DB/Redis guidance
 - CI/CD baseline
 
+## GitHub Actions (CI/CD)
+Workflows included:
+- `CI` (`.github/workflows/ci.yml`)
+- `Docker Publish` (`.github/workflows/docker-publish.yml`)
+- `Deploy` (`.github/workflows/deploy.yml`)
+- `CodeQL` (`.github/workflows/codeql.yml`)
+- `Dependabot` (`.github/dependabot.yml`)
+
+### Required GitHub Secrets
+For Docker publishing:
+- `DOCKERHUB_USERNAME` (optional, only if pushing to Docker Hub)
+- `DOCKERHUB_TOKEN` (optional, only if pushing to Docker Hub)
+
+For deployment over SSH:
+- `VPS_HOST`
+- `VPS_USER`
+- `VPS_SSH_KEY`
+- `VPS_PORT` (optional, defaults to `22`)
+- `VPS_APP_PATH` (optional, defaults to `/opt/algo-trading-platform`)
+
+For production app runtime on server:
+- Create `.env` on target server using `.env.example`
+- Set Stripe and JWT values before first production deploy
+
 ## Repository Structure
 ```text
 backend/                 API, auth, billing, backtesting
