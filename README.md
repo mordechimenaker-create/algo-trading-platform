@@ -1,77 +1,120 @@
 # Algo Trading SaaS Platform
 
-Production-style algo-trading platform with:
-- JWT auth (signup/login)
-- Plan-based limits (free/pro/enterprise)
-- Stripe checkout + billing portal + webhook sync
-- Backtesting engine
-- Strategy management
-- Order endpoints
-- Live market stream dashboard (WebSocket)
+A production-oriented algorithmic trading SaaS starter with authentication, Stripe subscriptions, strategy management, backtesting, and a live monitoring dashboard.
 
-## Stack
-- Backend: Node.js + Express + WebSocket
-- Frontend: Nginx static dashboard
-- Database: PostgreSQL
-- Cache: Redis
-- Orchestration: Docker Compose
+## Features
+- JWT authentication (`signup`, `login`, `me`)
+- Stripe subscription billing (`Checkout`, `Webhook`, `Billing Portal`)
+- Plan-based usage limits (`free`, `pro`, `enterprise`)
+- Strategy CRUD with per-user isolation
+- Backtesting engine with key metrics (return, Sharpe, drawdown, win rate)
+- Order endpoints and history tracking
+- Live price stream via WebSocket
+- Dockerized local environment (Backend, Frontend, PostgreSQL, Redis)
 
-## Quick Start (Local)
+## Architecture
+See full architecture notes in `docs/ARCHITECTURE.md`.
+
+High-level services:
+- `backend` (Node.js/Express/WebSocket)
+- `frontend` (Nginx static dashboard)
+- `postgres` (data persistence)
+- `redis` (cache/realtime support)
+
+## Screenshots
+Add images to `docs/screenshots/` and update paths if needed.
+
+- Dashboard: `docs/screenshots/dashboard.png`
+- Strategy Editor: `docs/screenshots/strategy-editor.png`
+- Backtest Results: `docs/screenshots/backtest-results.png`
+- Live Monitor: `docs/screenshots/live-monitor.png`
+- Billing: `docs/screenshots/billing.png`
+
+## Local Setup
+### 1) Clone
+```bash
+git clone https://github.com/mordechimenaker-create/algo-trading-platform.git
+cd algo-trading-platform
+```
+
+### 2) Configure env
 ```bash
 cp .env.example .env
-# Set Stripe variables in .env if you want real billing
+# fill Stripe values when ready
+```
 
+### 3) Start stack
+```bash
 docker compose up --build -d
 ```
 
-Open:
+### 4) Open app
 - Dashboard: `http://localhost:8081`
 - API: `http://localhost:3001`
 
 Demo user:
-- `demo@algo.local`
-- `demo12345`
+- Email: `demo@algo.local`
+- Password: `demo12345`
 
-## Stripe Setup
-See `STRIPE_SETUP.md`.
+## Stripe Billing Setup
+Short guide: `STRIPE_SETUP.md`
+Detailed guide: `docs/DEPLOYMENT.md#stripe-production-setup`
 
-Required env vars for real Stripe:
+Required env values:
 - `STRIPE_SECRET_KEY`
 - `STRIPE_WEBHOOK_SECRET`
 - `STRIPE_PRICE_ID_PRO`
 - `STRIPE_PRICE_ID_ENTERPRISE`
 - `APP_URL`
 
-## Important API Endpoints
-- `POST /api/auth/signup`
-- `POST /api/auth/login`
-- `GET /api/auth/me`
-- `POST /api/billing/checkout-session`
-- `POST /api/billing/portal-session`
-- `POST /api/billing/webhook`
-- `GET /api/billing/status`
-- `POST /api/strategies`
-- `GET /api/strategies`
-- `POST /api/backtest`
-- `POST /api/orders`
-- `GET /api/orders`
+## API Documentation
+Full API docs: `docs/API.md`
 
-## Publish To GitHub
-```bash
-git init
-git add .
-git commit -m "feat: algo trading saas with auth and stripe billing"
+Main groups:
+- Auth
+- Billing
+- Strategies
+- Backtesting
+- Orders
+- Health
 
-git branch -M main
-git remote add origin <YOUR_REPO_URL>
-git push -u origin main
+## Backtesting Docs
+See `docs/BACKTESTING.md` for:
+- Engine behavior
+- Metric definitions
+- Known limitations
+
+## Live Simulation Docs
+See `docs/LIVE_SIMULATION.md` for:
+- WebSocket feed format
+- Update cadence
+- Frontend behavior
+
+## Production Deployment
+See `docs/DEPLOYMENT.md` for:
+- `docker-compose.prod.yml`
+- Reverse proxy setup
+- HTTPS and domain setup
+- Managed DB/Redis guidance
+- CI/CD baseline
+
+## Repository Structure
+```text
+backend/                 API, auth, billing, backtesting
+frontend/public/         Dashboard UI
+db/init.sql              Schema and seed data
+docker-compose.yml       Local/dev stack
+docker-compose.prod.yml  Production-oriented stack
+docs/                    Product + technical docs
+deploy/nginx/            Reverse proxy configs
 ```
 
 ## Security Notes
 - Never commit real secrets.
-- Use `.env` for production secrets.
-- Rotate keys if exposed.
-- Put backend behind HTTPS in production.
+- Keep production secrets in `.env` or secret manager.
+- Rotate tokens/keys if exposed.
+- Enforce HTTPS in production.
+- Restrict CORS and tighten JWT secret policy in production.
 
 ## License
-MIT (see `LICENSE`).
+MIT (`LICENSE`)
