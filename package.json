@@ -20,6 +20,11 @@
     },
     "files": [
       "desktop/**/*",
+      "backend/**/*",
+      "frontend/**/*",
+      "db/**/*",
+      "docker-compose.yml",
+      ".env.example",
       "package.json"
     ],
     "win": {
@@ -29,6 +34,6 @@
       ],
       "artifactName": "Algo-Trading-Platform-${version}-${arch}.${ext}"
     },
-    "asar": true
+    "asar": false
   }
 }
