@@ -3,6 +3,13 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#0f766e" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Algo Trading" />
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <link rel="icon" href="/icons/icon-192.svg" type="image/svg+xml" />
+  <link rel="apple-touch-icon" href="/icons/icon-192.svg" />
   <title>Algo Trading SaaS</title>
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <style>
@@ -113,6 +120,7 @@
     .row-inline { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
     .small-btn { width: auto; padding: 6px 10px; border-radius: 8px; font-size: .84rem; }
     .spacer-top { margin-top: 8px; }
+    .hidden { display: none !important; }
     @media (max-width: 940px) {
       .top, .row4, .grid2, .grid3, .auth-grid { grid-template-columns: 1fr; }
     }
@@ -126,6 +134,9 @@
         <h1 class="title">Algo Trading SaaS Console</h1>
         <div class="muted">JWT Auth + Real Stripe Billing + plan-based limits</div>
         <div id="sessionText" style="margin-top:8px" class="warn">Not signed in</div>
+        <div style="margin-top:10px">
+          <button id="btnInstallApp" class="alt small-btn hidden">Install App</button>
+        </div>
       </div>
       <div class="card">
         <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
@@ -284,7 +295,8 @@ const state = {
   strategies: [],
   chart: null,
   ws: null,
-  wsReconnectTimer: null
+  wsReconnectTimer: null,
+  installPromptEvent: null
 };
 const limitsByPlan = {
   free: { strategies: 3, backtestsPerDay: 5 },
@@ -305,6 +317,40 @@ function showBanner(message, type = 'ok') {
   }, 3500);
 }
 function toast(msg, type = 'warn'){ showBanner(msg, type); }
+
+async function registerServiceWorker() {
+  if (!('serviceWorker' in navigator)) return;
+  try {
+    await navigator.serviceWorker.register('/service-worker.js');
+  } catch (_err) {
+    // PWA registration failure should not block app usage.
+  }
+}
+
+function setupInstallPrompt() {
+  const installBtn = el('btnInstallApp');
+  if (!installBtn) return;
+
+  window.addEventListener('beforeinstallprompt', (event) => {
+    event.preventDefault();
+    state.installPromptEvent = event;
+    installBtn.classList.remove('hidden');
+  });
+
+  installBtn.addEventListener('click', async () => {
+    if (!state.installPromptEvent) return;
+    state.installPromptEvent.prompt();
+    const outcome = await state.installPromptEvent.userChoice;
+    if (outcome.outcome === 'accepted') toast('App installed', 'ok');
+    state.installPromptEvent = null;
+    installBtn.classList.add('hidden');
+  });
+
+  window.addEventListener('appinstalled', () => {
+    installBtn.classList.add('hidden');
+    toast('Installed as app', 'ok');
+  });
+}
 
 function applyAuthPayload(data) {
   if (!data) return;
@@ -734,6 +780,8 @@ el('btnRefreshOrders').onclick = loadOrders;
 document.querySelectorAll('.planBtn').forEach(b => b.onclick = () => changePlan(b.dataset.plan));
 
 (async function init(){
+  await registerServiceWorker();
+  setupInstallPrompt();
   applyBillingResultFromUrl();
   await refreshMe();
   await loadStrategies();

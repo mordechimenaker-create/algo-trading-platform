@@ -93,6 +93,9 @@ See `docs/BACKTESTING.md` for:
 ## Load Testing
 See `docs/LOAD_TESTING.md`.
 
+## PWA App Install
+See `docs/PWA.md` to install the dashboard as a web app on desktop/mobile.
+
 ## Live Simulation Docs
 See `docs/LIVE_SIMULATION.md` for:
 - WebSocket feed format
