@@ -2,6 +2,7 @@ const express = require('express');
 const { WebSocketServer } = require('ws');
 const { createServer } = require('http');
 const cors = require('cors');
+const helmet = require('helmet');
 const { Pool } = require('pg');
 const redis = require('redis');
 const jwt = require('jsonwebtoken');
@@ -57,7 +58,14 @@ const pool = new Pool({
 const redisClient = redis.createClient({
   url: `redis://${process.env.REDIS_HOST || 'redis'}:${process.env.REDIS_PORT || 6379}`
 });
-redisClient.on('error', (err) => console.log('Redis Error', err.message));
+let redisConnected = false;
+redisClient.on('ready', () => {
+  redisConnected = true;
+});
+redisClient.on('error', (err) => {
+  redisConnected = false;
+  console.log('Redis Error', err.message);
+});
 redisClient.connect().catch((err) => console.log('Redis connect warning:', err.message));
 
 const clients = new Set();
@@ -92,6 +100,9 @@ app.use(cors({
     if (!origin || allowedOrigins.has(origin)) return callback(null, true);
     return callback(new Error('Origin not allowed by CORS'));
   }
+}));
+app.use(helmet({
+  contentSecurityPolicy: false
 }));
 
 app.use((req, res, next) => {
@@ -533,6 +544,8 @@ function buildOpenApiSpec() {
     },
     paths: {
       '/health': { get: { summary: 'Health check', responses: { 200: { description: 'OK' } } } },
+      '/live': { get: { summary: 'Liveness probe', responses: { 200: { description: 'UP' } } } },
+      '/ready': { get: { summary: 'Readiness probe', responses: { 200: { description: 'READY' }, 503: { description: 'NOT_READY' } } } },
       '/metrics': { get: { summary: 'Prometheus metrics', responses: { 200: { description: 'Metrics text/plain' } } } },
       '/api/auth/signup': { post: { summary: 'Create account', responses: { 201: { description: 'Created' } } } },
       '/api/auth/login': { post: { summary: 'Login', responses: { 200: { description: 'Logged in' } } } },
@@ -1305,6 +1318,23 @@ app.get('/metrics', (_req, res) => {
 
 app.get('/health', (_req, res) => {
   res.json({ status: 'OK', timestamp: new Date().toISOString() });
+});
+
+app.get('/live', (_req, res) => {
+  res.json({ status: 'UP', timestamp: new Date().toISOString() });
+});
+
+app.get('/ready', async (_req, res) => {
+  try {
+    await pool.query('SELECT 1');
+    const redisOk = redisConnected ? true : (await redisClient.ping()) === 'PONG';
+    if (!redisOk) {
+      return res.status(503).json({ status: 'NOT_READY', db: 'up', redis: 'down' });
+    }
+    return res.json({ status: 'READY', db: 'up', redis: 'up', timestamp: new Date().toISOString() });
+  } catch (err) {
+    return res.status(503).json({ status: 'NOT_READY', error: err.message });
+  }
 });
 
 async function start() {

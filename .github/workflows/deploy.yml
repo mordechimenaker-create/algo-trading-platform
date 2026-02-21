@@ -13,21 +13,38 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    if: ${{ secrets.VPS_HOST != '' && secrets.VPS_USER != '' && secrets.VPS_SSH_KEY != '' }}
+    env:
+      VPS_HOST: ${{ secrets.VPS_HOST }}
+      VPS_USER: ${{ secrets.VPS_USER }}
+      VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+      VPS_PORT: ${{ secrets.VPS_PORT }}
+      VPS_APP_PATH: ${{ secrets.VPS_APP_PATH }}
+      DEPLOY_REF: ${{ github.event.inputs.ref || 'main' }}
 
     steps:
+      - name: Validate deploy secrets
+        id: gate
+        run: |
+          if [ -z "$VPS_HOST" ] || [ -z "$VPS_USER" ] || [ -z "$VPS_SSH_KEY" ]; then
+            echo "should_deploy=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Skipping deploy because VPS secrets are missing."
+          else
+            echo "should_deploy=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Deploy over SSH
+        if: ${{ steps.gate.outputs.should_deploy == 'true' }}
         uses: appleboy/ssh-action@v1.2.0
         with:
-          host: ${{ secrets.VPS_HOST }}
-          username: ${{ secrets.VPS_USER }}
-          key: ${{ secrets.VPS_SSH_KEY }}
-          port: ${{ secrets.VPS_PORT || 22 }}
+          host: ${{ env.VPS_HOST }}
+          username: ${{ env.VPS_USER }}
+          key: ${{ env.VPS_SSH_KEY }}
+          port: ${{ env.VPS_PORT || 22 }}
           script: |
             set -e
-            APP_PATH="${{ secrets.VPS_APP_PATH || '/opt/algo-trading-platform' }}"
+            APP_PATH="${{ env.VPS_APP_PATH || '/opt/algo-trading-platform' }}"
             REPO_URL="https://github.com/${{ github.repository }}.git"
-            REF="${{ github.event.inputs.ref || 'main' }}"
+            REF="${{ env.DEPLOY_REF }}"
 
             if [ ! -d "$APP_PATH/.git" ]; then
               mkdir -p "$APP_PATH"

@@ -14,6 +14,7 @@ A production-oriented algorithmic trading SaaS starter with authentication, Stri
 - Live price stream via WebSocket
 - Built-in OpenAPI endpoint (`/openapi.json`) + Swagger UI (`/docs`)
 - Prometheus-style metrics endpoint (`/metrics`)
+- Health endpoints: `/health`, `/live`, `/ready`
 - Dockerized local environment (Backend, Frontend, PostgreSQL, Redis)
 
 ## Architecture
@@ -135,6 +136,8 @@ For deployment over SSH:
 - `VPS_SSH_KEY`
 - `VPS_PORT` (optional, defaults to `22`)
 - `VPS_APP_PATH` (optional, defaults to `/opt/algo-trading-platform`)
+
+If deploy secrets are missing, the Deploy workflow now exits gracefully with a warning instead of failing the push checks.
 
 For production app runtime on server:
 - Create `.env` on target server using `.env.example`
