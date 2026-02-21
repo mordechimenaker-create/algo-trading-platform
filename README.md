@@ -103,6 +103,12 @@ See `docs/PWA.md` to install the dashboard as a web app on desktop/mobile.
 ## Windows EXE
 See `docs/EXE_BUILD.md` to build a Windows `.exe` desktop wrapper.
 
+Latest Windows EXE release:
+- Tag: `v31e5266`
+- Release page: `https://github.com/mordechimenaker-create/algo-trading-platform/releases/tag/v31e5266`
+- Direct EXE: `https://github.com/mordechimenaker-create/algo-trading-platform/releases/download/v31e5266/Algo-Trading-Platform-1.0.0-x64.exe`
+- Behavior: on launch, tries to auto-start local stack (`docker compose up --build -d`) then opens dashboard.
+
 ## Live Simulation Docs
 See `docs/LIVE_SIMULATION.md` for:
 - WebSocket feed format
@@ -126,6 +132,7 @@ Workflows included:
 - `Docker Publish` (`.github/workflows/docker-publish.yml`)
 - `Deploy` (`.github/workflows/deploy.yml`)
 - `CodeQL` (`.github/workflows/codeql.yml`)
+- `Release EXE` (`.github/workflows/release-exe.yml`)
 - `Dependabot` (`.github/dependabot.yml`)
 
 ### Required GitHub Secrets

@@ -55,6 +55,21 @@ Install k6 and run:
 k6 run tests/load/k6-smoke.js
 ```
 
+## Desktop EXE
+- Build locally:
+```bash
+npm install
+npm run desktop:pack
+```
+- Output: `desktop/dist/Algo-Trading-Platform-1.0.0-x64.exe`
+- Runtime behavior: desktop app auto-attempts `docker compose up --build -d`, then opens dashboard.
+
+## EXE Release Workflow
+- Workflow file: `.github/workflows/release-exe.yml`
+- Trigger manually with `tag` input (existing GitHub release tag).
+- Upload target asset name:
+`Algo-Trading-Platform-1.0.0-x64.exe`
+
 ## Security Baseline
 - Keep `JWT_SECRET` strong and private.
 - Never commit real Stripe keys.

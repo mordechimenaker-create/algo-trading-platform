@@ -2,6 +2,11 @@
 
 This project now includes an Electron desktop wrapper.
 
+## Download Ready EXE
+- Current release tag: `v31e5266`
+- Release page: `https://github.com/mordechimenaker-create/algo-trading-platform/releases/tag/v31e5266`
+- Direct file: `https://github.com/mordechimenaker-create/algo-trading-platform/releases/download/v31e5266/Algo-Trading-Platform-1.0.0-x64.exe`
+
 ## What the EXE does
 - Opens the dashboard URL in a desktop window.
 - Tries to auto-start local stack via Docker Compose:
@@ -35,3 +40,10 @@ If Docker Desktop is not installed/running, start services manually:
 ```bash
 docker compose up --build -d
 ```
+
+## Publish EXE to GitHub Release
+1. Create/pick release tag in GitHub Releases.
+2. Run workflow: `Release EXE` (`.github/workflows/release-exe.yml`).
+3. Input `tag` (example: `v31e5266`).
+4. Workflow builds on `windows-latest` and uploads:
+- `Algo-Trading-Platform-1.0.0-x64.exe`
