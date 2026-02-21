@@ -2,39 +2,38 @@
 
 Base URL (local): `http://localhost:3001`
 
-Authentication: Bearer JWT in `Authorization` header.
+- OpenAPI JSON: `GET /openapi.json`
+- Swagger UI: `GET /docs`
+- Prometheus metrics: `GET /metrics`
+
+Authentication: Bearer access JWT in `Authorization` header.
 
 ## Auth
 ### `POST /api/auth/signup`
-Create user account.
+Create user account and return access+refresh tokens.
+
+### `POST /api/auth/login`
+Login and return access+refresh tokens.
+
+### `POST /api/auth/refresh`
+Rotate refresh token and issue a new access token.
 
 Request:
 ```json
 {
-  "username": "alice",
-  "email": "alice@example.com",
-  "password": "password123"
+  "refresh_token": "..."
 }
 ```
 
-### `POST /api/auth/login`
-Login and receive JWT.
+### `POST /api/auth/logout`
+Revoke refresh session(s).
 
 ### `GET /api/auth/me`
-Return current user profile and billing fields.
+Return current user profile, effective plan, and monthly usage counters.
 
 ## Billing
 ### `POST /api/billing/checkout-session`
 Create Stripe checkout session for paid plans.
-
-Request:
-```json
-{
-  "plan": "pro",
-  "success_url": "https://yourdomain.com/?billing=success",
-  "cancel_url": "https://yourdomain.com/?billing=cancel"
-}
-```
 
 ### `POST /api/billing/portal-session`
 Create Stripe billing portal session.
@@ -46,7 +45,10 @@ Stripe webhook endpoint (raw body + signature verification).
 Free downgrade path.
 
 ### `GET /api/billing/status`
-Read billing/subscription status for current user.
+Read billing/subscription status + grace period + usage counters.
+
+### `GET /api/usage/me`
+Current monthly usage usage-units and remaining quota.
 
 ## Strategies
 ### `POST /api/strategies`
@@ -72,7 +74,11 @@ Request:
 ```json
 {
   "strategy_id": 1,
-  "days": 30
+  "days": 30,
+  "fee_bps": 2,
+  "fee_fixed": 0,
+  "slippage_bps": 3,
+  "latency_ms": 25
 }
 ```
 
@@ -95,6 +101,7 @@ Health probe endpoint.
 
 ## Error Semantics
 - `401` unauthenticated/invalid token
-- `403` forbidden or plan limit hit
+- `403` forbidden or plan/usage limit hit
 - `404` resource not found (or not owned)
+- `429` rate limit exceeded
 - `500` server failure

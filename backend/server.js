@@ -6,6 +6,7 @@ const { Pool } = require('pg');
 const redis = require('redis');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
+const crypto = require('crypto');
 const Stripe = require('stripe');
 const BacktestEngine = require('./backtest');
 require('dotenv').config();
@@ -16,13 +17,21 @@ const wss = new WebSocketServer({ server });
 
 const DEV_JWT_SECRET = 'dev-jwt-secret-change-in-production';
 const JWT_SECRET = process.env.JWT_SECRET || DEV_JWT_SECRET;
-const JWT_EXPIRES_IN = '7d';
+const ACCESS_TOKEN_EXPIRES_IN = process.env.ACCESS_TOKEN_EXPIRES_IN || '15m';
+const REFRESH_TOKEN_EXPIRES_DAYS = Number(process.env.REFRESH_TOKEN_EXPIRES_DAYS || 30);
+const REFRESH_TOKEN_EXPIRES_MS = REFRESH_TOKEN_EXPIRES_DAYS * 24 * 60 * 60 * 1000;
 const APP_URL = process.env.APP_URL || 'http://localhost:8081';
+const GRACE_PERIOD_DAYS = Number(process.env.BILLING_GRACE_DAYS || 3);
+const RATE_LIMIT_WINDOW_MS = Number(process.env.RATE_LIMIT_WINDOW_MS || 60 * 1000);
+const RATE_LIMIT_PUBLIC_MAX = Number(process.env.RATE_LIMIT_PUBLIC_MAX || 120);
+const RATE_LIMIT_AUTH_MAX = Number(process.env.RATE_LIMIT_AUTH_MAX || 20);
+const RATE_LIMIT_PRIVATE_MAX = Number(process.env.RATE_LIMIT_PRIVATE_MAX || 240);
+const WEBSOCKET_UPDATE_INTERVAL_MS = Number(process.env.WS_UPDATE_INTERVAL_MS || 1000);
 
 const PLAN_LIMITS = {
-  free: { strategies: 3, backtestsPerDay: 5 },
-  pro: { strategies: 25, backtestsPerDay: 100 },
-  enterprise: { strategies: 100000, backtestsPerDay: 100000 }
+  free: { strategies: 3, backtestsPerDay: 5, monthlyUsageUnits: 600 },
+  pro: { strategies: 25, backtestsPerDay: 100, monthlyUsageUnits: 20000 },
+  enterprise: { strategies: 100000, backtestsPerDay: 100000, monthlyUsageUnits: 2000000 }
 };
 
 const PLAN_TO_PRICE_ID = {
@@ -31,6 +40,7 @@ const PLAN_TO_PRICE_ID = {
 };
 
 const ACTIVE_SUB_STATUSES = new Set(['active', 'trialing']);
+const GRACE_SUB_STATUSES = new Set(['past_due', 'unpaid']);
 
 const stripe = process.env.STRIPE_SECRET_KEY
   ? new Stripe(process.env.STRIPE_SECRET_KEY)
@@ -52,6 +62,18 @@ redisClient.connect().catch((err) => console.log('Redis connect warning:', err.m
 
 const clients = new Set();
 let prices = { AAPL: 150.25, GOOGL: 140.8, MSFT: 380.5, AMZN: 175.3 };
+const rateLimitState = new Map();
+const metrics = {
+  requestsTotal: 0,
+  requestsByRoute: new Map(),
+  requestsByStatus: new Map(),
+  authRefreshSuccessTotal: 0,
+  authRefreshFailureTotal: 0,
+  backtestsTotal: 0,
+  ordersTotal: 0,
+  usageDeniedTotal: 0,
+  rateLimitedTotal: 0
+};
 
 const allowedOrigins = new Set(
   (process.env.CORS_ORIGINS || '')
@@ -71,6 +93,51 @@ app.use(cors({
     return callback(new Error('Origin not allowed by CORS'));
   }
 }));
+
+app.use((req, res, next) => {
+  metrics.requestsTotal += 1;
+  metricInc(metrics.requestsByRoute, `${req.method} ${req.path}`);
+  res.on('finish', () => {
+    metricInc(metrics.requestsByStatus, String(res.statusCode));
+  });
+  next();
+});
+
+app.use((_req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  res.setHeader('X-XSS-Protection', '1; mode=block');
+  next();
+});
+
+function rateLimit({ windowMs, maxRequests, keyPrefix, skip }) {
+  return (req, res, next) => {
+    if (skip && skip(req)) return next();
+
+    const key = `${keyPrefix}:${req.ip}`;
+    const now = Date.now();
+    const current = rateLimitState.get(key);
+    if (!current || now >= current.resetAt) {
+      rateLimitState.set(key, { count: 1, resetAt: now + windowMs });
+      return next();
+    }
+
+    if (current.count >= maxRequests) {
+      metrics.rateLimitedTotal += 1;
+      const retryAfterSeconds = Math.max(1, Math.ceil((current.resetAt - now) / 1000));
+      res.setHeader('Retry-After', String(retryAfterSeconds));
+      return res.status(429).json({
+        error: 'Too many requests',
+        code: 'RATE_LIMIT_EXCEEDED',
+        retry_after_seconds: retryAfterSeconds
+      });
+    }
+
+    current.count += 1;
+    return next();
+  };
+}
 
 function normalizeSymbol(symbol) {
   return String(symbol || '').trim().toUpperCase();
@@ -126,12 +193,37 @@ function validateOrderInput({ symbol, quantity, price, side }) {
   };
 }
 
-function signToken(user) {
+function metricInc(map, key, value = 1) {
+  map.set(key, (map.get(key) || 0) + value);
+}
+
+function hashRefreshToken(token) {
+  return crypto.createHash('sha256').update(token).digest('hex');
+}
+
+function signAccessToken(user) {
   return jwt.sign(
-    { id: user.id, email: user.email, username: user.username, plan: user.plan || 'free' },
+    { id: user.id, email: user.email, username: user.username, plan: user.plan || 'free', token_type: 'access' },
     JWT_SECRET,
-    { expiresIn: JWT_EXPIRES_IN }
+    { expiresIn: ACCESS_TOKEN_EXPIRES_IN }
   );
+}
+
+function signRefreshToken(user, tokenVersion = 0) {
+  const jti = crypto.randomUUID();
+  const token = jwt.sign(
+    {
+      id: user.id,
+      token_type: 'refresh',
+      jti,
+      token_version: tokenVersion
+    },
+    JWT_SECRET,
+    { expiresIn: `${REFRESH_TOKEN_EXPIRES_DAYS}d` }
+  );
+
+  const expiresAt = new Date(Date.now() + REFRESH_TOKEN_EXPIRES_MS);
+  return { token, jti, expiresAt };
 }
 
 function getAuthToken(req) {
@@ -146,6 +238,9 @@ function requireAuth(req, res, next) {
 
   try {
     req.user = jwt.verify(token, JWT_SECRET);
+    if (req.user.token_type && req.user.token_type !== 'access') {
+      return res.status(401).json({ error: 'Invalid token type' });
+    }
     return next();
   } catch (_err) {
     return res.status(401).json({ error: 'Invalid token' });
@@ -183,7 +278,8 @@ async function loadCurrentUser(userId) {
   const result = await pool.query(
     `SELECT id, username, email, plan, balance, created_at,
             stripe_customer_id, stripe_subscription_id, stripe_subscription_status,
-            stripe_price_id, stripe_current_period_end
+            stripe_price_id, stripe_current_period_end, stripe_grace_until,
+            token_version
      FROM users
      WHERE id = $1`,
     [userId]
@@ -238,6 +334,7 @@ async function updateUserFromSubscription({
 
   const userId = userResult.rows[0].id;
   const mappedPlan = derivePlanFromSubscription(stripeSubscriptionStatus, stripePriceId);
+  const graceUntil = getGraceUntilFromSubscription(stripeSubscriptionStatus, stripeCurrentPeriodEnd);
 
   await pool.query(
     `UPDATE users
@@ -245,17 +342,232 @@ async function updateUserFromSubscription({
          stripe_subscription_id = $2,
          stripe_price_id = $3,
          stripe_subscription_status = $4,
-         stripe_current_period_end = $5
-     WHERE id = $6`,
+         stripe_current_period_end = $5,
+         stripe_grace_until = $6
+     WHERE id = $7`,
     [
       mappedPlan,
       stripeSubscriptionId || null,
       stripePriceId || null,
       stripeSubscriptionStatus || 'inactive',
       stripeCurrentPeriodEnd || null,
+      graceUntil,
       userId
     ]
   );
+}
+
+async function storeRefreshToken(userId, rawToken, jti, expiresAt) {
+  const tokenHash = hashRefreshToken(rawToken);
+  await pool.query(
+    `INSERT INTO refresh_tokens (user_id, token_hash, jti, expires_at)
+     VALUES ($1, $2, $3, $4)`,
+    [userId, tokenHash, jti, expiresAt]
+  );
+}
+
+async function issueAuthTokens(user, tokenVersion = 0) {
+  const accessToken = signAccessToken(user);
+  const refresh = signRefreshToken(user, tokenVersion);
+  await storeRefreshToken(user.id, refresh.token, refresh.jti, refresh.expiresAt);
+  return {
+    token: accessToken,
+    refresh_token: refresh.token,
+    refresh_expires_at: refresh.expiresAt.toISOString()
+  };
+}
+
+function getGraceUntilFromSubscription(status, periodEnd) {
+  if (GRACE_SUB_STATUSES.has(status)) {
+    return new Date(Date.now() + GRACE_PERIOD_DAYS * 24 * 60 * 60 * 1000);
+  }
+  if (status === 'canceled' && periodEnd) {
+    return new Date(periodEnd);
+  }
+  return null;
+}
+
+function isWithinGracePeriod(user) {
+  if (!user?.stripe_grace_until) return false;
+  return new Date(user.stripe_grace_until).getTime() > Date.now();
+}
+
+function getEffectivePlan(user) {
+  if (!user) return 'free';
+  if (ACTIVE_SUB_STATUSES.has(user.stripe_subscription_status)) return user.plan || 'free';
+  if (isWithinGracePeriod(user)) {
+    if (user.plan === 'enterprise') return 'pro';
+    return 'free';
+  }
+  return user.plan || 'free';
+}
+
+async function getMonthlyUsageUnits(userId) {
+  const result = await pool.query(
+    `SELECT COALESCE(SUM(units), 0)::int AS total
+     FROM usage_events
+     WHERE user_id = $1
+       AND DATE_TRUNC('month', created_at) = DATE_TRUNC('month', NOW())`,
+    [userId]
+  );
+  return result.rows[0]?.total || 0;
+}
+
+async function recordUsageEvent(userId, eventType, units) {
+  const safeUnits = Number.isInteger(units) && units > 0 ? units : 0;
+  if (!safeUnits) return;
+  await pool.query(
+    `INSERT INTO usage_events (user_id, event_type, units, created_at)
+     VALUES ($1, $2, $3, NOW())`,
+    [userId, eventType, safeUnits]
+  );
+}
+
+async function enforceUsageLimit(user, extraUnits) {
+  const plan = getEffectivePlan(user);
+  const limits = getPlanLimits(plan);
+  const monthlyUsageUnits = limits.monthlyUsageUnits || 0;
+  if (monthlyUsageUnits <= 0) return { allowed: true, usage: 0, limit: 0, plan };
+
+  const currentUsage = await getMonthlyUsageUnits(user.id);
+  const projected = currentUsage + extraUnits;
+  const usageHardStop = Number(process.env.STRICT_USAGE_CAP || 1) === 1;
+  if (usageHardStop && projected > monthlyUsageUnits) {
+    metrics.usageDeniedTotal += 1;
+    return {
+      allowed: false,
+      usage: currentUsage,
+      limit: monthlyUsageUnits,
+      plan,
+      grace: isWithinGracePeriod(user)
+    };
+  }
+
+  return {
+    allowed: true,
+    usage: currentUsage,
+    limit: monthlyUsageUnits,
+    plan,
+    grace: isWithinGracePeriod(user)
+  };
+}
+
+function mapToPrometheusSamples(metricName, map, labelsBuilder) {
+  const lines = [];
+  map.forEach((value, key) => {
+    const labels = labelsBuilder(key);
+    lines.push(`${metricName}{${labels}} ${value}`);
+  });
+  return lines;
+}
+
+function buildMetricsPayload() {
+  const lines = [
+    '# HELP algo_requests_total Total HTTP requests',
+    '# TYPE algo_requests_total counter',
+    `algo_requests_total ${metrics.requestsTotal}`,
+    '# HELP algo_rate_limited_total Requests rejected by rate limiting',
+    '# TYPE algo_rate_limited_total counter',
+    `algo_rate_limited_total ${metrics.rateLimitedTotal}`,
+    '# HELP algo_auth_refresh_success_total Successful token refreshes',
+    '# TYPE algo_auth_refresh_success_total counter',
+    `algo_auth_refresh_success_total ${metrics.authRefreshSuccessTotal}`,
+    '# HELP algo_auth_refresh_failure_total Failed token refreshes',
+    '# TYPE algo_auth_refresh_failure_total counter',
+    `algo_auth_refresh_failure_total ${metrics.authRefreshFailureTotal}`,
+    '# HELP algo_backtests_total Total backtests run',
+    '# TYPE algo_backtests_total counter',
+    `algo_backtests_total ${metrics.backtestsTotal}`,
+    '# HELP algo_orders_total Total simulated orders created',
+    '# TYPE algo_orders_total counter',
+    `algo_orders_total ${metrics.ordersTotal}`,
+    '# HELP algo_usage_denied_total Usage-cap denials',
+    '# TYPE algo_usage_denied_total counter',
+    `algo_usage_denied_total ${metrics.usageDeniedTotal}`
+  ];
+
+  lines.push('# HELP algo_requests_by_route_total Requests split by method/path');
+  lines.push('# TYPE algo_requests_by_route_total counter');
+  lines.push(
+    ...mapToPrometheusSamples(
+      'algo_requests_by_route_total',
+      metrics.requestsByRoute,
+      (key) => {
+        const method = key.split(' ')[0] || 'UNKNOWN';
+        const path = key.slice(method.length + 1) || '/';
+        return `method="${method}",path="${path}"`;
+      }
+    )
+  );
+
+  lines.push('# HELP algo_requests_by_status_total Requests split by status code');
+  lines.push('# TYPE algo_requests_by_status_total counter');
+  lines.push(
+    ...mapToPrometheusSamples(
+      'algo_requests_by_status_total',
+      metrics.requestsByStatus,
+      (status) => `status="${status}"`
+    )
+  );
+
+  return `${lines.join('\n')}\n`;
+}
+
+function buildOpenApiSpec() {
+  return {
+    openapi: '3.0.3',
+    info: {
+      title: 'Algo Trading Platform API',
+      version: '1.3.0',
+      description: 'Authentication, billing, strategies, backtesting and orders API'
+    },
+    servers: [{ url: APP_URL.replace(':8081', ':3001') }, { url: 'http://localhost:3001' }],
+    components: {
+      securitySchemes: {
+        BearerAuth: {
+          type: 'http',
+          scheme: 'bearer',
+          bearerFormat: 'JWT'
+        }
+      }
+    },
+    paths: {
+      '/health': { get: { summary: 'Health check', responses: { 200: { description: 'OK' } } } },
+      '/metrics': { get: { summary: 'Prometheus metrics', responses: { 200: { description: 'Metrics text/plain' } } } },
+      '/api/auth/signup': { post: { summary: 'Create account', responses: { 201: { description: 'Created' } } } },
+      '/api/auth/login': { post: { summary: 'Login', responses: { 200: { description: 'Logged in' } } } },
+      '/api/auth/refresh': { post: { summary: 'Rotate access+refresh token pair', responses: { 200: { description: 'Rotated' } } } },
+      '/api/auth/me': {
+        get: {
+          summary: 'Current user profile',
+          security: [{ BearerAuth: [] }],
+          responses: { 200: { description: 'Current user profile' } }
+        }
+      },
+      '/api/billing/status': {
+        get: {
+          summary: 'Billing and usage status',
+          security: [{ BearerAuth: [] }],
+          responses: { 200: { description: 'Billing status' } }
+        }
+      },
+      '/api/strategies': {
+        get: { summary: 'List strategies', security: [{ BearerAuth: [] }], responses: { 200: { description: 'List' } } },
+        post: { summary: 'Create strategy', security: [{ BearerAuth: [] }], responses: { 201: { description: 'Created' } } }
+      },
+      '/api/backtest': {
+        post: {
+          summary: 'Run backtest with optional fee/slippage/latency',
+          security: [{ BearerAuth: [] }],
+          responses: { 200: { description: 'Backtest result' } }
+        }
+      },
+      '/api/orders': {
+        get: { summary: 'List orders', security: [{ BearerAuth: [] }], responses: { 200: { description: 'List' } } },
+        post: { summary: 'Create order', security: [{ BearerAuth: [] }], responses: { 201: { description: 'Created' } } }
+      }
+    }
+  };
 }
 
 async function ensureSchema() {
@@ -266,6 +578,34 @@ async function ensureSchema() {
   await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS stripe_price_id VARCHAR(255)');
   await pool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS stripe_subscription_status VARCHAR(32) NOT NULL DEFAULT 'inactive'");
   await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS stripe_current_period_end TIMESTAMP');
+  await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS stripe_grace_until TIMESTAMP');
+  await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS token_version INT NOT NULL DEFAULT 0');
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS refresh_tokens (
+      id SERIAL PRIMARY KEY,
+      user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      token_hash VARCHAR(128) UNIQUE NOT NULL,
+      jti VARCHAR(128) UNIQUE NOT NULL,
+      expires_at TIMESTAMP NOT NULL,
+      revoked_at TIMESTAMP,
+      created_at TIMESTAMP DEFAULT NOW()
+    )
+  `);
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_refresh_tokens_user ON refresh_tokens(user_id)');
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_refresh_tokens_expiry ON refresh_tokens(expires_at)');
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS usage_events (
+      id SERIAL PRIMARY KEY,
+      user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      event_type VARCHAR(32) NOT NULL,
+      units INT NOT NULL CHECK (units >= 0),
+      created_at TIMESTAMP DEFAULT NOW()
+    )
+  `);
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_usage_events_user_created ON usage_events(user_id, created_at)');
+  await pool.query('DELETE FROM refresh_tokens WHERE expires_at < NOW() OR revoked_at IS NOT NULL');
 
   const demoUser = await pool.query('SELECT id FROM users WHERE email = $1', ['demo@algo.local']);
   if (demoUser.rows.length === 0) {
@@ -294,7 +634,7 @@ function broadcastPrices() {
     clients.forEach((client) => {
       if (client.readyState === 1) client.send(message);
     });
-  }, 1000);
+  }, WEBSOCKET_UPDATE_INTERVAL_MS);
 }
 
 app.post('/api/billing/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
@@ -359,6 +699,19 @@ app.post('/api/billing/webhook', express.raw({ type: 'application/json' }), asyn
 });
 
 app.use(express.json({ limit: '50mb' }));
+app.use('/api/auth', rateLimit({ windowMs: RATE_LIMIT_WINDOW_MS, maxRequests: RATE_LIMIT_AUTH_MAX, keyPrefix: 'auth' }));
+app.use('/api', rateLimit({
+  windowMs: RATE_LIMIT_WINDOW_MS,
+  maxRequests: RATE_LIMIT_PRIVATE_MAX,
+  keyPrefix: 'api',
+  skip: (req) => req.path.startsWith('/auth')
+}));
+app.use(rateLimit({
+  windowMs: RATE_LIMIT_WINDOW_MS,
+  maxRequests: RATE_LIMIT_PUBLIC_MAX,
+  keyPrefix: 'public',
+  skip: (req) => req.path.startsWith('/api')
+}));
 
 app.post('/api/auth/signup', async (req, res) => {
   try {
@@ -382,8 +735,8 @@ app.post('/api/auth/signup', async (req, res) => {
     );
 
     const user = insert.rows[0];
-    const token = signToken(user);
-    return res.status(201).json({ success: true, token, user });
+    const tokens = await issueAuthTokens(user, 0);
+    return res.status(201).json({ success: true, ...tokens, user });
   } catch (err) {
     return res.status(500).json({ error: 'Signup failed', detail: err.message });
   }
@@ -412,8 +765,8 @@ app.post('/api/auth/login', async (req, res) => {
       created_at: user.created_at
     };
 
-    const token = signToken(safeUser);
-    return res.json({ success: true, token, user: safeUser });
+    const tokens = await issueAuthTokens(safeUser, user.token_version || 0);
+    return res.json({ success: true, ...tokens, user: safeUser });
   } catch (err) {
     return res.status(500).json({ error: 'Login failed', detail: err.message });
   }
@@ -423,9 +776,91 @@ app.get('/api/auth/me', requireAuth, async (req, res) => {
   try {
     const user = await loadCurrentUser(req.user.id);
     if (!user) return res.status(404).json({ error: 'User not found' });
-    return res.json(user);
+    const plan = getEffectivePlan(user);
+    const usageThisMonth = await getMonthlyUsageUnits(user.id);
+    return res.json({
+      ...user,
+      plan,
+      usage_this_month: usageThisMonth,
+      usage_limit_monthly: getPlanLimits(plan).monthlyUsageUnits
+    });
   } catch (err) {
     return res.status(500).json({ error: 'Failed to load profile', detail: err.message });
+  }
+});
+
+app.post('/api/auth/refresh', async (req, res) => {
+  try {
+    const { refresh_token } = req.body || {};
+    if (!refresh_token) return res.status(400).json({ error: 'refresh_token is required' });
+
+    let payload;
+    try {
+      payload = jwt.verify(refresh_token, JWT_SECRET);
+    } catch (_err) {
+      metrics.authRefreshFailureTotal += 1;
+      return res.status(401).json({ error: 'Invalid refresh token' });
+    }
+
+    if (payload.token_type !== 'refresh') {
+      metrics.authRefreshFailureTotal += 1;
+      return res.status(401).json({ error: 'Invalid token type' });
+    }
+
+    const tokenHash = hashRefreshToken(refresh_token);
+    const stored = await pool.query(
+      `SELECT id, user_id, expires_at, revoked_at
+       FROM refresh_tokens
+       WHERE token_hash = $1 AND jti = $2`,
+      [tokenHash, payload.jti]
+    );
+    if (!stored.rows.length) {
+      metrics.authRefreshFailureTotal += 1;
+      return res.status(401).json({ error: 'Refresh token not found' });
+    }
+
+    const tokenRow = stored.rows[0];
+    if (tokenRow.revoked_at || new Date(tokenRow.expires_at).getTime() <= Date.now()) {
+      metrics.authRefreshFailureTotal += 1;
+      return res.status(401).json({ error: 'Refresh token expired or revoked' });
+    }
+
+    const user = await loadCurrentUser(tokenRow.user_id);
+    if (!user || Number(user.token_version || 0) !== Number(payload.token_version || 0)) {
+      metrics.authRefreshFailureTotal += 1;
+      return res.status(401).json({ error: 'Session no longer valid' });
+    }
+
+    await pool.query('UPDATE refresh_tokens SET revoked_at = NOW() WHERE id = $1', [tokenRow.id]);
+
+    const safeUser = {
+      id: user.id,
+      username: user.username,
+      email: user.email,
+      plan: getEffectivePlan(user),
+      balance: user.balance,
+      created_at: user.created_at
+    };
+    const nextTokens = await issueAuthTokens(safeUser, user.token_version || 0);
+    metrics.authRefreshSuccessTotal += 1;
+    return res.json({ success: true, ...nextTokens, user: safeUser });
+  } catch (err) {
+    metrics.authRefreshFailureTotal += 1;
+    return res.status(500).json({ error: 'Failed to refresh token', detail: err.message });
+  }
+});
+
+app.post('/api/auth/logout', requireAuth, async (req, res) => {
+  try {
+    const { refresh_token } = req.body || {};
+    if (refresh_token) {
+      await pool.query('UPDATE refresh_tokens SET revoked_at = NOW() WHERE token_hash = $1', [hashRefreshToken(refresh_token)]);
+    } else {
+      await pool.query('UPDATE refresh_tokens SET revoked_at = NOW() WHERE user_id = $1 AND revoked_at IS NULL', [req.user.id]);
+    }
+    return res.json({ success: true });
+  } catch (err) {
+    return res.status(500).json({ error: 'Logout failed', detail: err.message });
   }
 });
 
@@ -502,15 +937,16 @@ app.post('/api/billing/subscribe', requireAuth, async (req, res) => {
     const result = await pool.query(
       `UPDATE users
        SET plan = 'free',
-           stripe_subscription_status = 'inactive'
+           stripe_subscription_status = 'inactive',
+           stripe_grace_until = NULL
        WHERE id = $1
-       RETURNING id, username, email, plan, balance, created_at`,
+       RETURNING id, username, email, plan, balance, created_at, token_version`,
       [req.user.id]
     );
 
     const user = result.rows[0];
-    const token = signToken(user);
-    return res.json({ success: true, token, user });
+    const tokens = await issueAuthTokens(user, user.token_version || 0);
+    return res.json({ success: true, ...tokens, user });
   } catch (err) {
     return res.status(500).json({ error: 'Failed to update plan', detail: err.message });
   }
@@ -520,16 +956,41 @@ app.get('/api/billing/status', requireAuth, async (req, res) => {
   try {
     const user = await loadCurrentUser(req.user.id);
     if (!user) return res.status(404).json({ error: 'User not found' });
+    const effectivePlan = getEffectivePlan(user);
+    const usage = await getMonthlyUsageUnits(user.id);
+    const limits = getPlanLimits(effectivePlan);
     return res.json({
-      plan: user.plan,
+      plan: effectivePlan,
       stripe_customer_id: user.stripe_customer_id,
       stripe_subscription_id: user.stripe_subscription_id,
       stripe_price_id: user.stripe_price_id,
       stripe_subscription_status: user.stripe_subscription_status,
-      stripe_current_period_end: user.stripe_current_period_end
+      stripe_current_period_end: user.stripe_current_period_end,
+      stripe_grace_until: user.stripe_grace_until,
+      usage_this_month: usage,
+      usage_limit_monthly: limits.monthlyUsageUnits
     });
   } catch (err) {
     return res.status(500).json({ error: 'Failed to load billing status', detail: err.message });
+  }
+});
+
+app.get('/api/usage/me', requireAuth, async (req, res) => {
+  try {
+    const user = await loadCurrentUser(req.user.id);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    const plan = getEffectivePlan(user);
+    const limits = getPlanLimits(plan);
+    const usage = await getMonthlyUsageUnits(user.id);
+    return res.json({
+      plan,
+      usage_this_month: usage,
+      usage_limit_monthly: limits.monthlyUsageUnits,
+      remaining: Math.max(0, limits.monthlyUsageUnits - usage),
+      grace: isWithinGracePeriod(user)
+    });
+  } catch (err) {
+    return res.status(500).json({ error: 'Failed to load usage', detail: err.message });
   }
 });
 
@@ -543,12 +1004,13 @@ app.post('/api/strategies', requireAuth, async (req, res) => {
     const user = await loadCurrentUser(req.user.id);
     if (!user) return res.status(404).json({ error: 'User not found' });
 
-    const limits = getPlanLimits(user.plan);
+    const effectivePlan = getEffectivePlan(user);
+    const limits = getPlanLimits(effectivePlan);
     const countResult = await pool.query('SELECT COUNT(*)::int AS count FROM strategies WHERE user_id = $1', [user.id]);
     const strategyCount = countResult.rows[0].count;
     if (strategyCount >= limits.strategies) {
       return res.status(403).json({
-        error: `Plan limit reached. ${user.plan} allows up to ${limits.strategies} strategies`,
+        error: `Plan limit reached. ${effectivePlan} allows up to ${limits.strategies} strategies`,
         code: 'PLAN_LIMIT_STRATEGIES'
       });
     }
@@ -654,7 +1116,8 @@ app.post('/api/backtest', requireAuth, async (req, res) => {
     const user = await loadCurrentUser(req.user.id);
     if (!user) return res.status(404).json({ error: 'User not found' });
 
-    const limits = getPlanLimits(user.plan);
+    const effectivePlan = getEffectivePlan(user);
+    const limits = getPlanLimits(effectivePlan);
     const backtestCountResult = await pool.query(
       'SELECT COUNT(*)::int AS count FROM backtest_results WHERE user_id = $1 AND created_at::date = CURRENT_DATE',
       [user.id]
@@ -662,8 +1125,19 @@ app.post('/api/backtest', requireAuth, async (req, res) => {
     const backtestsToday = backtestCountResult.rows[0].count;
     if (backtestsToday >= limits.backtestsPerDay) {
       return res.status(403).json({
-        error: `Daily backtest limit reached. ${user.plan} allows ${limits.backtestsPerDay} per day`,
+        error: `Daily backtest limit reached. ${effectivePlan} allows ${limits.backtestsPerDay} per day`,
         code: 'PLAN_LIMIT_BACKTESTS'
+      });
+    }
+
+    const usageGate = await enforceUsageLimit(user, normalizedDays);
+    if (!usageGate.allowed) {
+      return res.status(403).json({
+        error: `Monthly usage limit reached (${usageGate.limit} units for ${usageGate.plan})`,
+        code: 'PLAN_LIMIT_USAGE',
+        usage: usageGate.usage,
+        limit: usageGate.limit,
+        grace: usageGate.grace
       });
     }
 
@@ -671,7 +1145,15 @@ app.post('/api/backtest', requireAuth, async (req, res) => {
     if (!strategy) return res.status(404).json({ error: 'Strategy not found' });
 
     const engine = new BacktestEngine();
-    const result = await engine.runBacktest(strategy.code, strategy.symbol, normalizedDays);
+    const feeBps = Number(req.body?.fee_bps ?? process.env.BACKTEST_FEE_BPS ?? 0);
+    const feeFixed = Number(req.body?.fee_fixed ?? process.env.BACKTEST_FEE_FIXED ?? 0);
+    const slippageBps = Number(req.body?.slippage_bps ?? process.env.BACKTEST_SLIPPAGE_BPS ?? 0);
+    const latencyMs = Number(req.body?.latency_ms ?? process.env.BACKTEST_LATENCY_MS ?? 0);
+    const result = await engine.runBacktest(strategy.code, strategy.symbol, normalizedDays, {
+      feeModel: { bps: feeBps, fixedPerTrade: feeFixed },
+      slippageBps,
+      latencyMs
+    });
     if (result.error) return res.status(400).json(result);
 
     await pool.query(
@@ -679,6 +1161,8 @@ app.post('/api/backtest', requireAuth, async (req, res) => {
        VALUES ($1, $2, $3, NOW())`,
       [strategy_id, user.id, JSON.stringify(result)]
     );
+    await recordUsageEvent(user.id, 'backtest', normalizedDays);
+    metrics.backtestsTotal += 1;
 
     return res.json(result);
   } catch (err) {
@@ -712,11 +1196,26 @@ app.post('/api/orders', requireAuth, async (req, res) => {
     const orderValidation = validateOrderInput({ symbol, quantity, price, side });
     if (orderValidation.error) return res.status(400).json({ error: orderValidation.error });
 
+    const user = await loadCurrentUser(req.user.id);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    const usageGate = await enforceUsageLimit(user, 1);
+    if (!usageGate.allowed) {
+      return res.status(403).json({
+        error: `Monthly usage limit reached (${usageGate.limit} units for ${usageGate.plan})`,
+        code: 'PLAN_LIMIT_USAGE',
+        usage: usageGate.usage,
+        limit: usageGate.limit,
+        grace: usageGate.grace
+      });
+    }
+
     const result = await pool.query(
       `INSERT INTO orders (user_id, symbol, quantity, price, side, status, created_at)
        VALUES ($1, $2, $3, $4, $5, $6, NOW()) RETURNING *`,
       [req.user.id, orderValidation.symbol, orderValidation.quantity, orderValidation.price, orderValidation.side, 'PENDING']
     );
+    await recordUsageEvent(req.user.id, 'order', 1);
+    metrics.ordersTotal += 1;
     return res.status(201).json({ success: true, order: result.rows[0] });
   } catch (err) {
     return res.status(500).json({ error: 'Order failed', detail: err.message });
@@ -766,10 +1265,42 @@ app.get('/api/orderbook/:symbol', (_req, res) => {
   });
 });
 
+app.get('/openapi.json', (_req, res) => {
+  res.json(buildOpenApiSpec());
+});
+
+app.get('/docs', (_req, res) => {
+  res.type('html').send(`<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Algo API Docs</title>
+  <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css">
+</head>
+<body>
+  <div id="swagger-ui"></div>
+  <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
+  <script>
+    window.ui = SwaggerUIBundle({
+      url: '/openapi.json',
+      dom_id: '#swagger-ui',
+      deepLinking: true,
+      presets: [SwaggerUIBundle.presets.apis]
+    });
+  </script>
+</body>
+</html>`);
+});
+
 wss.on('connection', (ws) => {
   clients.add(ws);
   ws.on('close', () => clients.delete(ws));
   ws.send(JSON.stringify({ type: 'price_update', prices, timestamp: new Date().toISOString() }));
+});
+
+app.get('/metrics', (_req, res) => {
+  res.type('text/plain').send(buildMetricsPayload());
 });
 
 app.get('/health', (_req, res) => {
@@ -786,6 +1317,19 @@ async function start() {
 
     await ensureSchema();
     broadcastPrices();
+    setInterval(() => {
+      const now = Date.now();
+      rateLimitState.forEach((entry, key) => {
+        if (entry.resetAt <= now) rateLimitState.delete(key);
+      });
+    }, RATE_LIMIT_WINDOW_MS);
+    setInterval(async () => {
+      try {
+        await pool.query('DELETE FROM refresh_tokens WHERE expires_at < NOW() OR revoked_at IS NOT NULL');
+      } catch (err) {
+        console.warn('refresh token cleanup warning:', err.message);
+      }
+    }, 60 * 60 * 1000);
     const PORT = process.env.PORT || 3000;
     server.listen(PORT, () => {
       console.log(`Trading API running on port ${PORT}`);

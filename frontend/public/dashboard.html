@@ -236,6 +236,11 @@
         <div class="card">
           <label>Strategy</label><select id="btStrategy"></select>
           <label style="margin-top:8px">Days</label><input type="number" min="1" value="30" id="btDays" />
+          <div class="grid3" style="margin-top:8px">
+            <div><label>Fee (bps)</label><input type="number" min="0" step="0.01" value="0" id="btFeeBps" /></div>
+            <div><label>Slippage (bps)</label><input type="number" min="0" step="0.01" value="0" id="btSlipBps" /></div>
+            <div><label>Latency (ms)</label><input type="number" min="0" step="1" value="0" id="btLatencyMs" /></div>
+          </div>
           <button class="primary" id="btnRunBacktest" style="margin-top:8px">Run Backtest</button>
           <div class="mono" id="btOutput" style="margin-top:8px">No backtest yet.</div>
         </div>
@@ -274,6 +279,7 @@
 const api = '/api';
 const state = {
   token: localStorage.getItem('token') || '',
+  refreshToken: localStorage.getItem('refresh_token') || '',
   user: null,
   strategies: [],
   chart: null,
@@ -300,6 +306,18 @@ function showBanner(message, type = 'ok') {
 }
 function toast(msg, type = 'warn'){ showBanner(msg, type); }
 
+function applyAuthPayload(data) {
+  if (!data) return;
+  if (data.token) {
+    state.token = data.token;
+    localStorage.setItem('token', state.token);
+  }
+  if (data.refresh_token) {
+    state.refreshToken = data.refresh_token;
+    localStorage.setItem('refresh_token', state.refreshToken);
+  }
+}
+
 function setClock(){ el('clock').textContent = new Date().toLocaleString(); }
 setClock(); setInterval(setClock, 1000);
 
@@ -309,10 +327,29 @@ function setTab(id){
 }
 document.querySelectorAll('.tabs button').forEach(b => b.onclick = () => setTab(b.dataset.tab));
 
-async function apiFetch(path, options = {}) {
+async function refreshAccessToken() {
+  if (!state.refreshToken) return false;
+  const res = await fetch(`${api}/auth/refresh`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ refresh_token: state.refreshToken })
+  });
+  if (!res.ok) return false;
+  const data = await res.json();
+  applyAuthPayload(data);
+  return true;
+}
+
+async function apiFetch(path, options = {}, alreadyRetried = false) {
   const headers = { 'Content-Type': 'application/json', ...(options.headers || {}) };
   if (state.token) headers.Authorization = `Bearer ${state.token}`;
   const res = await fetch(`${api}${path}`, { ...options, headers });
+
+  if (res.status === 401 && !alreadyRetried && path !== '/auth/refresh') {
+    const refreshed = await refreshAccessToken().catch(() => false);
+    if (refreshed) return apiFetch(path, options, true);
+  }
+
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
   return data;
@@ -337,11 +374,15 @@ function applySessionUI() {
   const plan = state.user.plan || 'free';
   const limits = limitsByPlan[plan] || limitsByPlan.free;
   const subStatus = state.user.stripe_subscription_status || 'inactive';
+  const usagePart = (state.user.usage_this_month != null && state.user.usage_limit_monthly != null)
+    ? ` | Monthly usage ${state.user.usage_this_month}/${state.user.usage_limit_monthly}`
+    : '';
+  const gracePart = state.user.stripe_grace_until ? ` | Grace until ${new Date(state.user.stripe_grace_until).toLocaleString()}` : '';
   el('sessionText').textContent = `Signed in as ${state.user.username} (${state.user.email})`;
   el('sessionText').className = 'ok';
   el('planBadge').textContent = plan;
   el('planBadge').className = `pill ${plan}`;
-  el('limitsText').textContent = `Subscription status: ${subStatus}. Limits: ${limits.strategies} strategies, ${limits.backtestsPerDay} backtests/day`;
+  el('limitsText').textContent = `Subscription status: ${subStatus}. Limits: ${limits.strategies} strategies, ${limits.backtestsPerDay} backtests/day${usagePart}${gracePart}`;
 }
 
 async function refreshMe() {
@@ -354,8 +395,10 @@ async function refreshMe() {
     state.user = await apiFetch('/auth/me', { method: 'GET' });
   } catch (_e) {
     state.token = '';
+    state.refreshToken = '';
     state.user = null;
     localStorage.removeItem('token');
+    localStorage.removeItem('refresh_token');
   }
   applySessionUI();
 }
@@ -366,8 +409,7 @@ async function login() {
     const password = el('loginPass').value;
     if (!email || !password) throw new Error('Enter email and password');
     const data = await apiFetch('/auth/login', { method: 'POST', body: JSON.stringify({ email, password }) });
-    state.token = data.token;
-    localStorage.setItem('token', state.token);
+    applyAuthPayload(data);
     await refreshMe();
     await loadStrategies();
     await loadOrders();
@@ -385,8 +427,7 @@ async function signup() {
     if (!username || !email || !password) throw new Error('Fill username, email, and password');
     if (password.length < 8) throw new Error('Password must be at least 8 chars');
     const data = await apiFetch('/auth/signup', { method: 'POST', body: JSON.stringify({ username, email, password }) });
-    state.token = data.token;
-    localStorage.setItem('token', state.token);
+    applyAuthPayload(data);
     await refreshMe();
     await loadStrategies();
     await loadOrders();
@@ -396,10 +437,22 @@ async function signup() {
   }
 }
 
-function logout() {
+async function logout() {
+  if (state.token) {
+    try {
+      await apiFetch('/auth/logout', {
+        method: 'POST',
+        body: JSON.stringify({ refresh_token: state.refreshToken || undefined })
+      });
+    } catch (_e) {
+      // Ignore logout API errors and clear local session anyway.
+    }
+  }
   state.token = '';
+  state.refreshToken = '';
   state.user = null;
   localStorage.removeItem('token');
+  localStorage.removeItem('refresh_token');
   if (state.wsReconnectTimer) window.clearTimeout(state.wsReconnectTimer);
   applySessionUI();
   el('strategyList').innerHTML = '';
@@ -414,8 +467,7 @@ async function changePlan(plan) {
 
     if (plan === 'free') {
       const data = await apiFetch('/billing/subscribe', { method: 'POST', body: JSON.stringify({ plan: 'free' }) });
-      state.token = data.token;
-      localStorage.setItem('token', state.token);
+      applyAuthPayload(data);
       await refreshMe();
       toast('Downgraded to free', 'ok');
       return;
@@ -548,10 +600,16 @@ async function runBacktest() {
     if (!el('btStrategy').value) throw new Error('Choose a strategy');
     const strategy_id = Number(el('btStrategy').value);
     const days = Number(el('btDays').value || 30);
+    const fee_bps = Number(el('btFeeBps').value || 0);
+    const slippage_bps = Number(el('btSlipBps').value || 0);
+    const latency_ms = Number(el('btLatencyMs').value || 0);
     if (!Number.isInteger(days) || days < 1 || days > 365) {
       throw new Error('Days must be an integer between 1 and 365');
     }
-    const data = await apiFetch('/backtest', { method: 'POST', body: JSON.stringify({ strategy_id, days }) });
+    const data = await apiFetch('/backtest', {
+      method: 'POST',
+      body: JSON.stringify({ strategy_id, days, fee_bps, slippage_bps, latency_ms })
+    });
     el('btOutput').textContent = JSON.stringify(data, null, 2);
     if (data.equity) drawEquity(data.equity);
     toast('Backtest completed', 'ok');

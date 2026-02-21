@@ -3,6 +3,12 @@ const vm = require('vm');
 const MAX_STRATEGY_LENGTH = 10000;
 const MAX_BACKTEST_DAYS = 365;
 const STRATEGY_TIMEOUT_MS = 25;
+const DEFAULT_FEE_MODEL = Object.freeze({ fixedPerTrade: 0, bps: 0 });
+const DEFAULT_EXECUTION_OPTIONS = Object.freeze({
+  slippageBps: 0,
+  latencyMs: 0,
+  feeModel: DEFAULT_FEE_MODEL
+});
 const BLOCKED_STRATEGY_PATTERNS = [
   /\bprocess\b/i,
   /\brequire\b/i,
@@ -21,6 +27,8 @@ class BacktestEngine {
     this.equity = [];
     this.portfolio = {};
     this.cash = 100000;
+    this.totalFeesPaid = 0;
+    this.executionOptions = DEFAULT_EXECUTION_OPTIONS;
   }
 
   generateHistoricalData(symbol, days = 30) {
@@ -74,7 +82,35 @@ class BacktestEngine {
     return { valid: true };
   }
 
-  async runBacktest(strategyCode, symbol = 'AAPL', days = 30) {
+  getExecutionOptions(options = {}) {
+    const normalizedSlippage = Number(options.slippageBps ?? 0);
+    const normalizedLatency = Number(options.latencyMs ?? 0);
+    const feeModel = options.feeModel || {};
+    const fixedPerTrade = Number(feeModel.fixedPerTrade ?? 0);
+    const bps = Number(feeModel.bps ?? 0);
+
+    return {
+      slippageBps: Number.isFinite(normalizedSlippage) && normalizedSlippage >= 0 ? normalizedSlippage : 0,
+      latencyMs: Number.isFinite(normalizedLatency) && normalizedLatency >= 0 ? normalizedLatency : 0,
+      feeModel: {
+        fixedPerTrade: Number.isFinite(fixedPerTrade) && fixedPerTrade >= 0 ? fixedPerTrade : 0,
+        bps: Number.isFinite(bps) && bps >= 0 ? bps : 0
+      }
+    };
+  }
+
+  applyExecutionPrice(side, quotedPrice) {
+    const slippagePct = this.executionOptions.slippageBps / 10000;
+    if (side === 'BUY') return quotedPrice * (1 + slippagePct);
+    return quotedPrice * (1 - slippagePct);
+  }
+
+  getTradeFees(notional) {
+    const { fixedPerTrade, bps } = this.executionOptions.feeModel;
+    return fixedPerTrade + (notional * bps / 10000);
+  }
+
+  async runBacktest(strategyCode, symbol = 'AAPL', days = 30, options = {}) {
     if (!Number.isInteger(days) || days < 1 || days > MAX_BACKTEST_DAYS) {
       return { error: `days must be an integer between 1 and ${MAX_BACKTEST_DAYS}` };
     }
@@ -84,18 +120,26 @@ class BacktestEngine {
       return { error: strategyValidation.error };
     }
 
-    const historicalData = this.generateHistoricalData(symbol, days);
+    const historicalData = Array.isArray(options.historicalData) && options.historicalData.length
+      ? options.historicalData
+      : this.generateHistoricalData(symbol, days);
+    this.executionOptions = this.getExecutionOptions(options);
     const strategyScript = new vm.Script(strategyCode);
 
     this.trades = [];
     this.equity = [];
     this.portfolio = {};
     this.cash = 100000;
+    this.totalFeesPaid = 0;
 
-    const executeOrder = (side, quantity, price) => {
+    const executeOrder = (side, quantity, price, orderSymbol = symbol) => {
       const normalizedSide = String(side || '').toUpperCase();
+      const normalizedSymbol = String(orderSymbol || symbol).trim().toUpperCase();
       if (!['BUY', 'SELL'].includes(normalizedSide)) {
         return { success: false, reason: 'Invalid side' };
+      }
+      if (!/^[A-Z]{1,10}$/.test(normalizedSymbol)) {
+        return { success: false, reason: 'Invalid symbol' };
       }
 
       if (!Number.isFinite(quantity) || quantity <= 0 || !Number.isInteger(quantity)) {
@@ -106,20 +150,45 @@ class BacktestEngine {
         return { success: false, reason: 'Price must be a positive number' };
       }
 
-      const cost = quantity * price;
+      const executionPrice = this.applyExecutionPrice(normalizedSide, price);
+      const notional = quantity * executionPrice;
+      const fees = this.getTradeFees(notional);
+      const timestamp = new Date(Date.now() + this.executionOptions.latencyMs).toISOString();
 
       if (normalizedSide === 'BUY') {
-        if (this.cash < cost) return { success: false, reason: 'Insufficient cash' };
-        this.cash -= cost;
-        this.portfolio[symbol] = (this.portfolio[symbol] || 0) + quantity;
-        this.trades.push({ timestamp: new Date().toISOString(), side: 'BUY', quantity, price, cost });
+        const totalCost = notional + fees;
+        if (this.cash < totalCost) return { success: false, reason: 'Insufficient cash' };
+        this.cash -= totalCost;
+        this.totalFeesPaid += fees;
+        this.portfolio[normalizedSymbol] = (this.portfolio[normalizedSymbol] || 0) + quantity;
+        this.trades.push({
+          timestamp,
+          side: 'BUY',
+          symbol: normalizedSymbol,
+          quantity,
+          price: Number(executionPrice.toFixed(6)),
+          quotedPrice: Number(price.toFixed(6)),
+          fees: Number(fees.toFixed(6)),
+          cost: Number(totalCost.toFixed(6))
+        });
       } else if (normalizedSide === 'SELL') {
-        if ((this.portfolio[symbol] || 0) < quantity) {
+        if ((this.portfolio[normalizedSymbol] || 0) < quantity) {
           return { success: false, reason: 'Insufficient shares' };
         }
-        this.cash += cost;
-        this.portfolio[symbol] -= quantity;
-        this.trades.push({ timestamp: new Date().toISOString(), side: 'SELL', quantity, price, proceeds: cost });
+        const proceeds = notional - fees;
+        this.cash += proceeds;
+        this.totalFeesPaid += fees;
+        this.portfolio[normalizedSymbol] -= quantity;
+        this.trades.push({
+          timestamp,
+          side: 'SELL',
+          symbol: normalizedSymbol,
+          quantity,
+          price: Number(executionPrice.toFixed(6)),
+          quotedPrice: Number(price.toFixed(6)),
+          fees: Number(fees.toFixed(6)),
+          proceeds: Number(proceeds.toFixed(6))
+        });
       }
 
       return { success: true };
@@ -191,6 +260,9 @@ class BacktestEngine {
       sharpeRatio: Number(sharpeRatio.toFixed(2)),
       maxDrawdown: Number((maxDrawdown * 100).toFixed(2)),
       winRate: Number(winRate.toFixed(2)),
+      totalFeesPaid: Number(this.totalFeesPaid.toFixed(2)),
+      slippageBps: Number(this.executionOptions.slippageBps.toFixed(4)),
+      latencyMs: Number(this.executionOptions.latencyMs.toFixed(2)),
       totalTrades: this.trades.length,
       trades: this.trades,
       equity: this.equity.map((e) => ({ timestamp: e.timestamp, value: Number(e.value.toFixed(2)) }))

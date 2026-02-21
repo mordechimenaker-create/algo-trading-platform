@@ -4,12 +4,16 @@ A production-oriented algorithmic trading SaaS starter with authentication, Stri
 
 ## Features
 - JWT authentication (`signup`, `login`, `me`)
+- Refresh token rotation (`/api/auth/refresh`, `/api/auth/logout`)
 - Stripe subscription billing (`Checkout`, `Webhook`, `Billing Portal`)
 - Plan-based usage limits (`free`, `pro`, `enterprise`)
+- Grace period + monthly usage-unit enforcement
 - Strategy CRUD with per-user isolation
-- Backtesting engine with key metrics (return, Sharpe, drawdown, win rate)
+- Backtesting engine with key metrics (return, Sharpe, drawdown, win rate) + fee/slippage/latency simulation
 - Order endpoints and history tracking
 - Live price stream via WebSocket
+- Built-in OpenAPI endpoint (`/openapi.json`) + Swagger UI (`/docs`)
+- Prometheus-style metrics endpoint (`/metrics`)
 - Dockerized local environment (Backend, Frontend, PostgreSQL, Redis)
 
 ## Architecture
@@ -69,6 +73,8 @@ Required env values:
 
 ## API Documentation
 Full API docs: `docs/API.md`
+OpenAPI JSON: `/openapi.json`
+Swagger UI: `/docs`
 
 Main groups:
 - Auth
@@ -84,6 +90,9 @@ See `docs/BACKTESTING.md` for:
 - Metric definitions
 - Known limitations
 
+## Load Testing
+See `docs/LOAD_TESTING.md`.
+
 ## Live Simulation Docs
 See `docs/LIVE_SIMULATION.md` for:
 - WebSocket feed format
@@ -97,6 +106,9 @@ See `docs/DEPLOYMENT.md` for:
 - HTTPS and domain setup
 - Managed DB/Redis guidance
 - CI/CD baseline
+
+## Developer Onboarding
+See `docs/DEVELOPER_ONBOARDING.md`.
 
 ## GitHub Actions (CI/CD)
 Workflows included:

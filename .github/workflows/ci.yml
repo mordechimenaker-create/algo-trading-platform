@@ -27,6 +27,9 @@ jobs:
           node --check backend/server.js
           node --check backend/backtest.js
 
+      - name: Run backend tests
+        run: npm test --prefix backend
+
       - name: Validate compose files
         run: |
           docker compose -f docker-compose.yml config
