@@ -7,6 +7,8 @@ A production-oriented algorithmic trading SaaS starter with authentication, Stri
 - Refresh token rotation (`/api/auth/refresh`, `/api/auth/logout`)
 - Stripe subscription billing (`Checkout`, `Webhook`, `Billing Portal`)
 - Plan-based usage limits (`free`, `pro`, `enterprise`)
+- Role-based access control (`admin`, `user`, `read-only`)
+- Audit logging for auth, strategy, backtest, order, and billing actions
 - Grace period + monthly usage-unit enforcement
 - Strategy CRUD with per-user isolation
 - Backtesting engine with key metrics (return, Sharpe, drawdown, win rate) + fee/slippage/latency simulation
@@ -80,6 +82,7 @@ Swagger UI: `/docs`
 Main groups:
 - Auth
 - Billing
+- Activity / Admin Audit
 - Strategies
 - Backtesting
 - Orders

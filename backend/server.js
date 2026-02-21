@@ -42,6 +42,7 @@ const PLAN_TO_PRICE_ID = {
 
 const ACTIVE_SUB_STATUSES = new Set(['active', 'trialing']);
 const GRACE_SUB_STATUSES = new Set(['past_due', 'unpaid']);
+const VALID_ROLES = new Set(['admin', 'user', 'read-only']);
 
 const stripe = process.env.STRIPE_SECRET_KEY
   ? new Stripe(process.env.STRIPE_SECRET_KEY)
@@ -213,8 +214,16 @@ function hashRefreshToken(token) {
 }
 
 function signAccessToken(user) {
+  const normalizedRole = VALID_ROLES.has(user.role) ? user.role : 'user';
   return jwt.sign(
-    { id: user.id, email: user.email, username: user.username, plan: user.plan || 'free', token_type: 'access' },
+    {
+      id: user.id,
+      email: user.email,
+      username: user.username,
+      plan: user.plan || 'free',
+      role: normalizedRole,
+      token_type: 'access'
+    },
     JWT_SECRET,
     { expiresIn: ACCESS_TOKEN_EXPIRES_IN }
   );
@@ -258,6 +267,53 @@ function requireAuth(req, res, next) {
   }
 }
 
+function requireRole(...roles) {
+  const roleSet = new Set(roles);
+  return (req, res, next) => {
+    const role = req.user?.role || 'user';
+    if (!roleSet.has(role)) {
+      return res.status(403).json({ error: 'Forbidden', required_roles: [...roleSet], current_role: role });
+    }
+    return next();
+  };
+}
+
+function requireWriteAccess(req, res, next) {
+  if ((req.user?.role || 'user') === 'read-only') {
+    return res.status(403).json({ error: 'Forbidden for read-only role' });
+  }
+  return next();
+}
+
+async function recordAuditEvent({
+  userId,
+  action,
+  resourceType,
+  resourceId = null,
+  status = 'success',
+  detail = null,
+  req = null
+}) {
+  try {
+    await pool.query(
+      `INSERT INTO audit_logs (user_id, action, resource_type, resource_id, status, detail, ip_address, user_agent, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())`,
+      [
+        userId || null,
+        String(action || 'unknown'),
+        String(resourceType || 'system'),
+        resourceId == null ? null : String(resourceId),
+        String(status || 'success'),
+        detail ? JSON.stringify(detail) : null,
+        req?.ip || null,
+        req?.headers?.['user-agent'] || null
+      ]
+    );
+  } catch (err) {
+    console.warn('audit log warning:', err.message);
+  }
+}
+
 function requireStripeConfigured(res) {
   if (!stripe) {
     res.status(500).json({
@@ -287,7 +343,7 @@ function derivePlanFromSubscription(status, priceId) {
 
 async function loadCurrentUser(userId) {
   const result = await pool.query(
-    `SELECT id, username, email, plan, balance, created_at,
+    `SELECT id, username, email, role, plan, balance, created_at,
             stripe_customer_id, stripe_subscription_id, stripe_subscription_status,
             stripe_price_id, stripe_current_period_end, stripe_grace_until,
             token_version
@@ -564,6 +620,20 @@ function buildOpenApiSpec() {
           responses: { 200: { description: 'Billing status' } }
         }
       },
+      '/api/activity/me': {
+        get: {
+          summary: 'Current user audit activity',
+          security: [{ BearerAuth: [] }],
+          responses: { 200: { description: 'Activity entries' } }
+        }
+      },
+      '/api/admin/audit-logs': {
+        get: {
+          summary: 'Admin audit logs',
+          security: [{ BearerAuth: [] }],
+          responses: { 200: { description: 'Audit entries' }, 403: { description: 'Forbidden' } }
+        }
+      },
       '/api/strategies': {
         get: { summary: 'List strategies', security: [{ BearerAuth: [] }], responses: { 200: { description: 'List' } } },
         post: { summary: 'Create strategy', security: [{ BearerAuth: [] }], responses: { 201: { description: 'Created' } } }
@@ -585,6 +655,7 @@ function buildOpenApiSpec() {
 
 async function ensureSchema() {
   await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash TEXT');
+  await pool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS role VARCHAR(32) NOT NULL DEFAULT 'user'");
   await pool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS plan VARCHAR(32) NOT NULL DEFAULT 'free'");
   await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS stripe_customer_id VARCHAR(255)');
   await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS stripe_subscription_id VARCHAR(255)');
@@ -618,15 +689,31 @@ async function ensureSchema() {
     )
   `);
   await pool.query('CREATE INDEX IF NOT EXISTS idx_usage_events_user_created ON usage_events(user_id, created_at)');
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS audit_logs (
+      id SERIAL PRIMARY KEY,
+      user_id INT REFERENCES users(id) ON DELETE SET NULL,
+      action VARCHAR(64) NOT NULL,
+      resource_type VARCHAR(64) NOT NULL,
+      resource_id VARCHAR(128),
+      status VARCHAR(16) NOT NULL DEFAULT 'success',
+      detail JSONB,
+      ip_address VARCHAR(64),
+      user_agent TEXT,
+      created_at TIMESTAMP DEFAULT NOW()
+    )
+  `);
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_audit_logs_user_created ON audit_logs(user_id, created_at DESC)');
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_audit_logs_action_created ON audit_logs(action, created_at DESC)');
   await pool.query('DELETE FROM refresh_tokens WHERE expires_at < NOW() OR revoked_at IS NOT NULL');
 
   const demoUser = await pool.query('SELECT id FROM users WHERE email = $1', ['demo@algo.local']);
   if (demoUser.rows.length === 0) {
     const hash = await bcrypt.hash('demo12345', 10);
     await pool.query(
-      `INSERT INTO users (username, email, balance, plan, stripe_subscription_status, password_hash)
-       VALUES ($1, $2, $3, $4, $5, $6)`,
-      ['demo', 'demo@algo.local', 25000, 'free', 'inactive', hash]
+      `INSERT INTO users (username, email, role, balance, plan, stripe_subscription_status, password_hash)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      ['demo', 'demo@algo.local', 'user', 25000, 'free', 'inactive', hash]
     );
   }
 }
@@ -741,14 +828,21 @@ app.post('/api/auth/signup', async (req, res) => {
 
     const passwordHash = await bcrypt.hash(password, 10);
     const insert = await pool.query(
-      `INSERT INTO users (username, email, balance, plan, stripe_subscription_status, password_hash)
-       VALUES ($1, $2, $3, $4, $5, $6)
-       RETURNING id, username, email, plan, balance, created_at`,
-      [username, email, 10000, 'free', 'inactive', passwordHash]
+      `INSERT INTO users (username, email, role, balance, plan, stripe_subscription_status, password_hash)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       RETURNING id, username, email, role, plan, balance, created_at`,
+      [username, email, 'user', 10000, 'free', 'inactive', passwordHash]
     );
 
     const user = insert.rows[0];
     const tokens = await issueAuthTokens(user, 0);
+    await recordAuditEvent({
+      userId: user.id,
+      action: 'auth.signup',
+      resourceType: 'user',
+      resourceId: user.id,
+      req
+    });
     return res.status(201).json({ success: true, ...tokens, user });
   } catch (err) {
     return res.status(500).json({ error: 'Signup failed', detail: err.message });
@@ -773,12 +867,20 @@ app.post('/api/auth/login', async (req, res) => {
       id: user.id,
       username: user.username,
       email: user.email,
+      role: user.role || 'user',
       plan: user.plan,
       balance: user.balance,
       created_at: user.created_at
     };
 
     const tokens = await issueAuthTokens(safeUser, user.token_version || 0);
+    await recordAuditEvent({
+      userId: user.id,
+      action: 'auth.login',
+      resourceType: 'user',
+      resourceId: user.id,
+      req
+    });
     return res.json({ success: true, ...tokens, user: safeUser });
   } catch (err) {
     return res.status(500).json({ error: 'Login failed', detail: err.message });
@@ -850,11 +952,19 @@ app.post('/api/auth/refresh', async (req, res) => {
       id: user.id,
       username: user.username,
       email: user.email,
+      role: user.role || 'user',
       plan: getEffectivePlan(user),
       balance: user.balance,
       created_at: user.created_at
     };
     const nextTokens = await issueAuthTokens(safeUser, user.token_version || 0);
+    await recordAuditEvent({
+      userId: user.id,
+      action: 'auth.refresh',
+      resourceType: 'user',
+      resourceId: user.id,
+      req
+    });
     metrics.authRefreshSuccessTotal += 1;
     return res.json({ success: true, ...nextTokens, user: safeUser });
   } catch (err) {
@@ -871,13 +981,20 @@ app.post('/api/auth/logout', requireAuth, async (req, res) => {
     } else {
       await pool.query('UPDATE refresh_tokens SET revoked_at = NOW() WHERE user_id = $1 AND revoked_at IS NULL', [req.user.id]);
     }
+    await recordAuditEvent({
+      userId: req.user.id,
+      action: 'auth.logout',
+      resourceType: 'user',
+      resourceId: req.user.id,
+      req
+    });
     return res.json({ success: true });
   } catch (err) {
     return res.status(500).json({ error: 'Logout failed', detail: err.message });
   }
 });
 
-app.post('/api/billing/checkout-session', requireAuth, async (req, res) => {
+app.post('/api/billing/checkout-session', requireAuth, requireWriteAccess, async (req, res) => {
   try {
     if (!requireStripeConfigured(res)) return;
 
@@ -915,13 +1032,21 @@ app.post('/api/billing/checkout-session', requireAuth, async (req, res) => {
       }
     });
 
+    await recordAuditEvent({
+      userId: req.user.id,
+      action: 'billing.checkout_session.create',
+      resourceType: 'billing',
+      resourceId: session.id,
+      detail: { plan },
+      req
+    });
     return res.json({ url: session.url, session_id: session.id });
   } catch (err) {
     return res.status(500).json({ error: 'Failed to create checkout session', detail: err.message });
   }
 });
 
-app.post('/api/billing/portal-session', requireAuth, async (req, res) => {
+app.post('/api/billing/portal-session', requireAuth, requireWriteAccess, async (req, res) => {
   try {
     if (!requireStripeConfigured(res)) return;
 
@@ -934,13 +1059,20 @@ app.post('/api/billing/portal-session', requireAuth, async (req, res) => {
       return_url: req.body.return_url || `${APP_URL}/?billing=portal_return`
     });
 
+    await recordAuditEvent({
+      userId: req.user.id,
+      action: 'billing.portal_session.create',
+      resourceType: 'billing',
+      resourceId: customerId,
+      req
+    });
     return res.json({ url: portalSession.url });
   } catch (err) {
     return res.status(500).json({ error: 'Failed to create portal session', detail: err.message });
   }
 });
 
-app.post('/api/billing/subscribe', requireAuth, async (req, res) => {
+app.post('/api/billing/subscribe', requireAuth, requireWriteAccess, async (req, res) => {
   try {
     const { plan } = req.body;
     if (plan !== 'free') {
@@ -953,12 +1085,20 @@ app.post('/api/billing/subscribe', requireAuth, async (req, res) => {
            stripe_subscription_status = 'inactive',
            stripe_grace_until = NULL
        WHERE id = $1
-       RETURNING id, username, email, plan, balance, created_at, token_version`,
+       RETURNING id, username, email, role, plan, balance, created_at, token_version`,
       [req.user.id]
     );
 
     const user = result.rows[0];
     const tokens = await issueAuthTokens(user, user.token_version || 0);
+    await recordAuditEvent({
+      userId: req.user.id,
+      action: 'billing.plan.change',
+      resourceType: 'user',
+      resourceId: req.user.id,
+      detail: { plan: 'free' },
+      req
+    });
     return res.json({ success: true, ...tokens, user });
   } catch (err) {
     return res.status(500).json({ error: 'Failed to update plan', detail: err.message });
@@ -1007,7 +1147,53 @@ app.get('/api/usage/me', requireAuth, async (req, res) => {
   }
 });
 
-app.post('/api/strategies', requireAuth, async (req, res) => {
+app.get('/api/activity/me', requireAuth, async (req, res) => {
+  try {
+    const limit = Math.max(1, Math.min(200, Number(req.query.limit || 50)));
+    const result = await pool.query(
+      `SELECT id, action, resource_type, resource_id, status, detail, ip_address, user_agent, created_at
+       FROM audit_logs
+       WHERE user_id = $1
+       ORDER BY created_at DESC
+       LIMIT $2`,
+      [req.user.id, limit]
+    );
+    return res.json(result.rows);
+  } catch (err) {
+    return res.status(500).json({ error: 'Failed to load activity', detail: err.message });
+  }
+});
+
+app.get('/api/admin/audit-logs', requireAuth, requireRole('admin'), async (req, res) => {
+  try {
+    const limit = Math.max(1, Math.min(500, Number(req.query.limit || 100)));
+    const userId = req.query.user_id ? Number(req.query.user_id) : null;
+    if (userId && !Number.isInteger(userId)) {
+      return res.status(400).json({ error: 'user_id must be an integer' });
+    }
+    const result = userId
+      ? await pool.query(
+        `SELECT id, user_id, action, resource_type, resource_id, status, detail, ip_address, user_agent, created_at
+         FROM audit_logs
+         WHERE user_id = $1
+         ORDER BY created_at DESC
+         LIMIT $2`,
+        [userId, limit]
+      )
+      : await pool.query(
+        `SELECT id, user_id, action, resource_type, resource_id, status, detail, ip_address, user_agent, created_at
+         FROM audit_logs
+         ORDER BY created_at DESC
+         LIMIT $1`,
+        [limit]
+      );
+    return res.json(result.rows);
+  } catch (err) {
+    return res.status(500).json({ error: 'Failed to load audit logs', detail: err.message });
+  }
+});
+
+app.post('/api/strategies', requireAuth, requireWriteAccess, async (req, res) => {
   try {
     const { name, description, code, symbol } = req.body;
     const validationError = validateStrategyInput({ name, code, symbol });
@@ -1033,6 +1219,14 @@ app.post('/api/strategies', requireAuth, async (req, res) => {
        VALUES ($1, $2, $3, $4, $5, NOW()) RETURNING *`,
       [user.id, name.trim(), String(description || '').trim(), code, normalizedSymbol]
     );
+    await recordAuditEvent({
+      userId: user.id,
+      action: 'strategy.create',
+      resourceType: 'strategy',
+      resourceId: result.rows[0].id,
+      detail: { symbol: normalizedSymbol },
+      req
+    });
     return res.status(201).json({ success: true, strategy: result.rows[0] });
   } catch (err) {
     return res.status(500).json({ error: 'Failed to save strategy', detail: err.message });
@@ -1076,7 +1270,7 @@ app.get('/api/strategies/:id', requireAuth, async (req, res) => {
   }
 });
 
-app.put('/api/strategies/:id', requireAuth, async (req, res) => {
+app.put('/api/strategies/:id', requireAuth, requireWriteAccess, async (req, res) => {
   try {
     const strategy = await assertStrategyOwnership(req.params.id, req.user.id);
     if (!strategy) return res.status(404).json({ error: 'Not found' });
@@ -1101,23 +1295,38 @@ app.put('/api/strategies/:id', requireAuth, async (req, res) => {
         req.user.id
       ]
     );
+    await recordAuditEvent({
+      userId: req.user.id,
+      action: 'strategy.update',
+      resourceType: 'strategy',
+      resourceId: req.params.id,
+      detail: { symbol: normalizeSymbol(nextSymbol) },
+      req
+    });
     return res.json({ success: true, strategy: result.rows[0] });
   } catch (err) {
     return res.status(500).json({ error: 'Failed to update strategy', detail: err.message });
   }
 });
 
-app.delete('/api/strategies/:id', requireAuth, async (req, res) => {
+app.delete('/api/strategies/:id', requireAuth, requireWriteAccess, async (req, res) => {
   try {
     const result = await pool.query('DELETE FROM strategies WHERE id = $1 AND user_id = $2', [req.params.id, req.user.id]);
     if (!result.rowCount) return res.status(404).json({ error: 'Not found' });
+    await recordAuditEvent({
+      userId: req.user.id,
+      action: 'strategy.delete',
+      resourceType: 'strategy',
+      resourceId: req.params.id,
+      req
+    });
     return res.json({ success: true });
   } catch (err) {
     return res.status(500).json({ error: 'Failed to delete strategy', detail: err.message });
   }
 });
 
-app.post('/api/backtest', requireAuth, async (req, res) => {
+app.post('/api/backtest', requireAuth, requireWriteAccess, async (req, res) => {
   try {
     const { strategy_id, days = 30 } = req.body;
     if (!strategy_id) return res.status(400).json({ error: 'strategy_id is required' });
@@ -1175,6 +1384,14 @@ app.post('/api/backtest', requireAuth, async (req, res) => {
       [strategy_id, user.id, JSON.stringify(result)]
     );
     await recordUsageEvent(user.id, 'backtest', normalizedDays);
+    await recordAuditEvent({
+      userId: user.id,
+      action: 'backtest.run',
+      resourceType: 'strategy',
+      resourceId: strategy_id,
+      detail: { days: normalizedDays, symbol: strategy.symbol },
+      req
+    });
     metrics.backtestsTotal += 1;
 
     return res.json(result);
@@ -1203,7 +1420,7 @@ app.get('/api/backtests/:strategy_id', requireAuth, async (req, res) => {
   }
 });
 
-app.post('/api/orders', requireAuth, async (req, res) => {
+app.post('/api/orders', requireAuth, requireWriteAccess, async (req, res) => {
   try {
     const { symbol, quantity, price, side } = req.body;
     const orderValidation = validateOrderInput({ symbol, quantity, price, side });
@@ -1228,6 +1445,14 @@ app.post('/api/orders', requireAuth, async (req, res) => {
       [req.user.id, orderValidation.symbol, orderValidation.quantity, orderValidation.price, orderValidation.side, 'PENDING']
     );
     await recordUsageEvent(req.user.id, 'order', 1);
+    await recordAuditEvent({
+      userId: req.user.id,
+      action: 'order.create',
+      resourceType: 'order',
+      resourceId: result.rows[0].id,
+      detail: { symbol: orderValidation.symbol, side: orderValidation.side, quantity: orderValidation.quantity },
+      req
+    });
     metrics.ordersTotal += 1;
     return res.status(201).json({ success: true, order: result.rows[0] });
   } catch (err) {

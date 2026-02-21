@@ -3,6 +3,7 @@ CREATE TABLE IF NOT EXISTS users (
   username VARCHAR(100) UNIQUE NOT NULL,
   email VARCHAR(100) UNIQUE NOT NULL,
   password_hash TEXT,
+  role VARCHAR(32) NOT NULL DEFAULT 'user',
   plan VARCHAR(32) NOT NULL DEFAULT 'free',
   token_version INT NOT NULL DEFAULT 0,
   balance DECIMAL(15, 2) DEFAULT 10000.00,
@@ -64,6 +65,19 @@ CREATE TABLE IF NOT EXISTS usage_events (
   created_at TIMESTAMP DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS audit_logs (
+  id SERIAL PRIMARY KEY,
+  user_id INT REFERENCES users(id) ON DELETE SET NULL,
+  action VARCHAR(64) NOT NULL,
+  resource_type VARCHAR(64) NOT NULL,
+  resource_id VARCHAR(128),
+  status VARCHAR(16) NOT NULL DEFAULT 'success',
+  detail JSONB,
+  ip_address VARCHAR(64),
+  user_agent TEXT,
+  created_at TIMESTAMP DEFAULT NOW()
+);
+
 CREATE INDEX IF NOT EXISTS idx_strategies_user ON strategies(user_id);
 CREATE INDEX IF NOT EXISTS idx_backtest_strategy ON backtest_results(strategy_id);
 CREATE INDEX IF NOT EXISTS idx_backtest_user ON backtest_results(user_id);
@@ -72,11 +86,13 @@ CREATE INDEX IF NOT EXISTS idx_orders_symbol ON orders(symbol);
 CREATE INDEX IF NOT EXISTS idx_refresh_tokens_user ON refresh_tokens(user_id);
 CREATE INDEX IF NOT EXISTS idx_refresh_tokens_expiry ON refresh_tokens(expires_at);
 CREATE INDEX IF NOT EXISTS idx_usage_events_user_created ON usage_events(user_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_audit_logs_user_created ON audit_logs(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_audit_logs_action_created ON audit_logs(action, created_at DESC);
 
-INSERT INTO users (username, email, balance) VALUES
-  ('trader1', 'trader1@example.com', 50000.00),
-  ('trader2', 'trader2@example.com', 75000.00),
-  ('trader3', 'trader3@example.com', 100000.00)
+INSERT INTO users (username, email, role, balance) VALUES
+  ('trader1', 'trader1@example.com', 'admin', 50000.00),
+  ('trader2', 'trader2@example.com', 'user', 75000.00),
+  ('trader3', 'trader3@example.com', 'read-only', 100000.00)
 ON CONFLICT (username) DO NOTHING;
 
 INSERT INTO strategies (user_id, name, description, code, symbol, status) VALUES
