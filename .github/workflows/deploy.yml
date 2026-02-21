@@ -34,7 +34,7 @@ jobs:
 
       - name: Deploy over SSH
         if: ${{ steps.gate.outputs.should_deploy == 'true' }}
-        uses: appleboy/ssh-action@v1.2.0
+        uses: appleboy/ssh-action@v1.2.5
         with:
           host: ${{ env.VPS_HOST }}
           username: ${{ env.VPS_USER }}
