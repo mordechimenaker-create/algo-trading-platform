@@ -16,6 +16,7 @@
       --brand2: #0369a1;
       --warn: #b45309;
       --ok: #166534;
+      --danger: #991b1b;
     }
     * { box-sizing: border-box; }
     body {
@@ -38,6 +39,7 @@
       border: 1px solid var(--line);
       border-radius: 14px;
       padding: 14px;
+      box-shadow: 0 8px 24px rgba(2, 6, 23, 0.04);
     }
     .title { margin: 0; font-size: 1.4rem; }
     .muted { color: var(--muted); }
@@ -59,6 +61,18 @@
       cursor: pointer;
     }
     .tabs button.active { background: var(--brand); border-color: var(--brand); color: #fff; }
+    .banner {
+      margin-bottom: 12px;
+      border-radius: 10px;
+      border: 1px solid transparent;
+      padding: 10px 12px;
+      display: none;
+      font-weight: 600;
+    }
+    .banner.show { display: block; }
+    .banner.ok { color: var(--ok); border-color: #86efac; background: #f0fdf4; }
+    .banner.warn { color: var(--warn); border-color: #fcd34d; background: #fffbeb; }
+    .banner.error { color: var(--danger); border-color: #fca5a5; background: #fef2f2; }
     .panel { display: none; }
     .panel.active { display: block; }
     .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
@@ -95,6 +109,10 @@
     .price h4 { margin: 0 0 4px; }
     .ok { color: var(--ok); }
     .warn { color: var(--warn); }
+    .danger { color: var(--danger); }
+    .row-inline { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .small-btn { width: auto; padding: 6px 10px; border-radius: 8px; font-size: .84rem; }
+    .spacer-top { margin-top: 8px; }
     @media (max-width: 940px) {
       .top, .row4, .grid2, .grid3, .auth-grid { grid-template-columns: 1fr; }
     }
@@ -102,6 +120,7 @@
 </head>
 <body>
   <div class="wrap">
+    <div id="banner" class="banner"></div>
     <div class="top">
       <div class="card">
         <h1 class="title">Algo Trading SaaS Console</h1>
@@ -114,7 +133,10 @@
             <div class="muted" style="font-size:.85rem">Current Plan</div>
             <div id="planBadge" class="pill free">free</div>
           </div>
-          <div class="muted" id="clock">-</div>
+          <div>
+            <div class="muted" id="clock">-</div>
+            <div class="muted" id="socketState" style="font-size:.78rem;text-align:right;">Live: connecting...</div>
+          </div>
         </div>
         <div style="margin-top:8px" class="muted" id="limitsText">Sign in to see usage limits.</div>
       </div>
@@ -254,7 +276,9 @@ const state = {
   token: localStorage.getItem('token') || '',
   user: null,
   strategies: [],
-  chart: null
+  chart: null,
+  ws: null,
+  wsReconnectTimer: null
 };
 const limitsByPlan = {
   free: { strategies: 3, backtestsPerDay: 5 },
@@ -264,7 +288,17 @@ const limitsByPlan = {
 
 function el(id){ return document.getElementById(id); }
 function money(v){ return Number(v).toFixed(2); }
-function toast(msg){ alert(msg); }
+function showBanner(message, type = 'ok') {
+  const banner = el('banner');
+  banner.textContent = message;
+  banner.className = `banner ${type} show`;
+  window.clearTimeout(showBanner.timer);
+  showBanner.timer = window.setTimeout(() => {
+    banner.className = 'banner';
+    banner.textContent = '';
+  }, 3500);
+}
+function toast(msg, type = 'warn'){ showBanner(msg, type); }
 
 function setClock(){ el('clock').textContent = new Date().toLocaleString(); }
 setClock(); setInterval(setClock, 1000);
@@ -285,6 +319,12 @@ async function apiFetch(path, options = {}) {
 }
 
 function applySessionUI() {
+  document.querySelectorAll('.planBtn').forEach((button) => {
+    button.disabled = !state.token;
+  });
+  el('btnPortal').disabled = !state.token;
+  el('btnLogout').disabled = !state.token;
+
   if (!state.user) {
     el('sessionText').textContent = 'Not signed in';
     el('sessionText').className = 'warn';
@@ -324,15 +364,16 @@ async function login() {
   try {
     const email = el('loginEmail').value.trim();
     const password = el('loginPass').value;
+    if (!email || !password) throw new Error('Enter email and password');
     const data = await apiFetch('/auth/login', { method: 'POST', body: JSON.stringify({ email, password }) });
     state.token = data.token;
     localStorage.setItem('token', state.token);
     await refreshMe();
     await loadStrategies();
     await loadOrders();
-    toast('Logged in');
+    toast('Logged in', 'ok');
   } catch (e) {
-    toast(e.message);
+    toast(e.message, 'error');
   }
 }
 
@@ -341,15 +382,17 @@ async function signup() {
     const username = el('signUser').value.trim();
     const email = el('signEmail').value.trim();
     const password = el('signPass').value;
+    if (!username || !email || !password) throw new Error('Fill username, email, and password');
+    if (password.length < 8) throw new Error('Password must be at least 8 chars');
     const data = await apiFetch('/auth/signup', { method: 'POST', body: JSON.stringify({ username, email, password }) });
     state.token = data.token;
     localStorage.setItem('token', state.token);
     await refreshMe();
     await loadStrategies();
     await loadOrders();
-    toast('Account created');
+    toast('Account created', 'ok');
   } catch (e) {
-    toast(e.message);
+    toast(e.message, 'error');
   }
 }
 
@@ -357,11 +400,12 @@ function logout() {
   state.token = '';
   state.user = null;
   localStorage.removeItem('token');
+  if (state.wsReconnectTimer) window.clearTimeout(state.wsReconnectTimer);
   applySessionUI();
   el('strategyList').innerHTML = '';
   el('orderList').innerHTML = '';
   el('btStrategy').innerHTML = '';
-  toast('Logged out');
+  toast('Logged out', 'ok');
 }
 
 async function changePlan(plan) {
@@ -373,7 +417,7 @@ async function changePlan(plan) {
       state.token = data.token;
       localStorage.setItem('token', state.token);
       await refreshMe();
-      toast('Downgraded to free');
+      toast('Downgraded to free', 'ok');
       return;
     }
 
@@ -389,7 +433,7 @@ async function changePlan(plan) {
     if (!data.url) throw new Error('Checkout URL missing');
     window.location.href = data.url;
   } catch (e) {
-    toast(e.message);
+    toast(e.message, 'error');
   }
 }
 
@@ -403,7 +447,7 @@ async function openBillingPortal() {
     if (!data.url) throw new Error('Portal URL missing');
     window.location.href = data.url;
   } catch (e) {
-    toast(e.message);
+    toast(e.message, 'error');
   }
 }
 
@@ -416,6 +460,14 @@ async function loadStrategies() {
     list.innerHTML = '';
     sel.innerHTML = '';
 
+    if (!state.strategies.length) {
+      const empty = document.createElement('div');
+      empty.className = 'item muted';
+      empty.textContent = 'No strategies yet. Create one on the left.';
+      list.appendChild(empty);
+      return;
+    }
+
     state.strategies.forEach(s => {
       const d = document.createElement('div');
       d.className = 'item';
@@ -427,9 +479,21 @@ async function loadStrategies() {
       const desc = document.createElement('div');
       desc.className = 'muted';
       desc.textContent = s.description || '';
+      const actions = document.createElement('div');
+      actions.className = 'row-inline spacer-top';
+      const runBtn = document.createElement('button');
+      runBtn.type = 'button';
+      runBtn.className = 'small-btn';
+      runBtn.textContent = 'Run Backtest';
+      runBtn.onclick = () => {
+        sel.value = String(s.id);
+        setTab('backtest');
+      };
+      actions.appendChild(runBtn);
       d.appendChild(title);
       d.appendChild(symbolSpan);
       d.appendChild(desc);
+      d.appendChild(actions);
       list.appendChild(d);
 
       const o = document.createElement('option');
@@ -438,24 +502,31 @@ async function loadStrategies() {
       sel.appendChild(o);
     });
   } catch (e) {
-    toast(e.message);
+    toast(e.message, 'error');
   }
 }
 
 async function saveStrategy() {
   try {
     if (!state.token) throw new Error('Login first');
+    const name = el('stName').value.trim();
+    const symbol = (el('stSymbol').value.trim() || 'AAPL').toUpperCase();
+    const code = el('stCode').value;
+    if (!name) throw new Error('Strategy name is required');
+    if (!/^[A-Z]{1,10}$/.test(symbol)) throw new Error('Symbol must be 1-10 uppercase letters');
+    if (!code.trim()) throw new Error('Strategy code is required');
+
     const payload = {
-      name: el('stName').value.trim(),
+      name,
       description: el('stDesc').value.trim(),
-      symbol: el('stSymbol').value.trim() || 'AAPL',
-      code: el('stCode').value
+      symbol,
+      code
     };
     await apiFetch('/strategies', { method: 'POST', body: JSON.stringify(payload) });
     await loadStrategies();
-    toast('Strategy saved');
+    toast('Strategy saved', 'ok');
   } catch (e) {
-    toast(e.message);
+    toast(e.message, 'error');
   }
 }
 
@@ -474,30 +545,41 @@ function drawEquity(equity) {
 async function runBacktest() {
   try {
     if (!state.token) throw new Error('Login first');
+    if (!el('btStrategy').value) throw new Error('Choose a strategy');
     const strategy_id = Number(el('btStrategy').value);
     const days = Number(el('btDays').value || 30);
+    if (!Number.isInteger(days) || days < 1 || days > 365) {
+      throw new Error('Days must be an integer between 1 and 365');
+    }
     const data = await apiFetch('/backtest', { method: 'POST', body: JSON.stringify({ strategy_id, days }) });
     el('btOutput').textContent = JSON.stringify(data, null, 2);
     if (data.equity) drawEquity(data.equity);
+    toast('Backtest completed', 'ok');
   } catch (e) {
-    toast(e.message);
+    toast(e.message, 'error');
   }
 }
 
 async function placeOrder() {
   try {
     if (!state.token) throw new Error('Login first');
+    const symbol = (el('odSymbol').value.trim() || 'AAPL').toUpperCase();
+    const quantity = Number(el('odQty').value || 1);
+    const price = Number(el('odPrice').value || 0);
+    if (!/^[A-Z]{1,10}$/.test(symbol)) throw new Error('Symbol must be 1-10 uppercase letters');
+    if (!Number.isInteger(quantity) || quantity <= 0) throw new Error('Quantity must be a positive integer');
+    if (!Number.isFinite(price) || price <= 0) throw new Error('Price must be a positive number');
     const payload = {
-      symbol: el('odSymbol').value.trim() || 'AAPL',
+      symbol,
       side: el('odSide').value,
-      quantity: Number(el('odQty').value || 1),
-      price: Number(el('odPrice').value || 0)
+      quantity,
+      price
     };
     await apiFetch('/orders', { method: 'POST', body: JSON.stringify(payload) });
     await loadOrders();
-    toast('Order placed');
+    toast('Order placed', 'ok');
   } catch (e) {
-    toast(e.message);
+    toast(e.message, 'error');
   }
 }
 
@@ -522,13 +604,28 @@ async function loadOrders() {
       list.appendChild(d);
     });
   } catch (e) {
-    toast(e.message);
+    toast(e.message, 'error');
   }
 }
 
 function startSocket() {
+  if (state.ws) {
+    state.ws.onopen = null;
+    state.ws.onclose = null;
+    state.ws.onmessage = null;
+    state.ws.onerror = null;
+    state.ws.close();
+  }
+
+  el('socketState').textContent = 'Live: connecting...';
   const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
   const ws = new WebSocket(`${wsProto}://${location.host}`);
+  state.ws = ws;
+
+  ws.onopen = () => {
+    el('socketState').textContent = 'Live: connected';
+  };
+
   ws.onmessage = (event) => {
     const msg = JSON.parse(event.data);
     if (msg.type !== 'price_update') return;
@@ -541,6 +638,30 @@ function startSocket() {
     const log = el('liveLog');
     log.textContent = line + '\n' + log.textContent.split('\n').slice(0, 30).join('\n');
   };
+
+  ws.onerror = () => {
+    el('socketState').textContent = 'Live: error';
+  };
+
+  ws.onclose = () => {
+    el('socketState').textContent = 'Live: reconnecting...';
+    if (state.wsReconnectTimer) window.clearTimeout(state.wsReconnectTimer);
+    state.wsReconnectTimer = window.setTimeout(startSocket, 2000);
+  };
+}
+
+function applyBillingResultFromUrl() {
+  const params = new URLSearchParams(window.location.search);
+  const billing = params.get('billing');
+  if (!billing) return;
+
+  if (billing === 'success') toast('Billing checkout completed successfully', 'ok');
+  if (billing === 'cancel') toast('Billing checkout was canceled', 'warn');
+  if (billing === 'portal_return') toast('Returned from billing portal', 'ok');
+
+  params.delete('billing');
+  const next = `${window.location.pathname}${params.toString() ? `?${params.toString()}` : ''}`;
+  window.history.replaceState({}, '', next);
 }
 
 el('btnLogin').onclick = login;
@@ -555,6 +676,7 @@ el('btnRefreshOrders').onclick = loadOrders;
 document.querySelectorAll('.planBtn').forEach(b => b.onclick = () => changePlan(b.dataset.plan));
 
 (async function init(){
+  applyBillingResultFromUrl();
   await refreshMe();
   await loadStrategies();
   await loadOrders();
