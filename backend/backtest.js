@@ -1,3 +1,20 @@
+const vm = require('vm');
+
+const MAX_STRATEGY_LENGTH = 10000;
+const MAX_BACKTEST_DAYS = 365;
+const STRATEGY_TIMEOUT_MS = 25;
+const BLOCKED_STRATEGY_PATTERNS = [
+  /\bprocess\b/i,
+  /\brequire\b/i,
+  /\bglobalThis\b/i,
+  /\bglobal\b/i,
+  /\bmodule\b/i,
+  /\bexports\b/i,
+  /\bchild_process\b/i,
+  /\bFunction\b/i,
+  /\beval\b/i
+];
+
 class BacktestEngine {
   constructor() {
     this.trades = [];
@@ -30,15 +47,45 @@ class BacktestEngine {
     return data;
   }
 
-  async runBacktest(strategyCode, symbol = 'AAPL', days = 30) {
-    const historicalData = this.generateHistoricalData(symbol, days);
-
-    let strategy;
-    try {
-      strategy = new Function('data', 'portfolio', 'cash', 'executeOrder', strategyCode);
-    } catch (err) {
-      return { error: `Syntax error: ${err.message}` };
+  static validateStrategyCode(strategyCode) {
+    if (typeof strategyCode !== 'string') {
+      return { valid: false, error: 'Strategy code must be a string' };
     }
+
+    if (!strategyCode.trim()) {
+      return { valid: false, error: 'Strategy code cannot be empty' };
+    }
+
+    if (strategyCode.length > MAX_STRATEGY_LENGTH) {
+      return { valid: false, error: `Strategy code too long (max ${MAX_STRATEGY_LENGTH} chars)` };
+    }
+
+    const blocked = BLOCKED_STRATEGY_PATTERNS.find((pattern) => pattern.test(strategyCode));
+    if (blocked) {
+      return { valid: false, error: 'Strategy contains blocked keywords for safety' };
+    }
+
+    try {
+      new vm.Script(strategyCode);
+    } catch (err) {
+      return { valid: false, error: `Syntax error: ${err.message}` };
+    }
+
+    return { valid: true };
+  }
+
+  async runBacktest(strategyCode, symbol = 'AAPL', days = 30) {
+    if (!Number.isInteger(days) || days < 1 || days > MAX_BACKTEST_DAYS) {
+      return { error: `days must be an integer between 1 and ${MAX_BACKTEST_DAYS}` };
+    }
+
+    const strategyValidation = BacktestEngine.validateStrategyCode(strategyCode);
+    if (!strategyValidation.valid) {
+      return { error: strategyValidation.error };
+    }
+
+    const historicalData = this.generateHistoricalData(symbol, days);
+    const strategyScript = new vm.Script(strategyCode);
 
     this.trades = [];
     this.equity = [];
@@ -46,14 +93,27 @@ class BacktestEngine {
     this.cash = 100000;
 
     const executeOrder = (side, quantity, price) => {
+      const normalizedSide = String(side || '').toUpperCase();
+      if (!['BUY', 'SELL'].includes(normalizedSide)) {
+        return { success: false, reason: 'Invalid side' };
+      }
+
+      if (!Number.isFinite(quantity) || quantity <= 0 || !Number.isInteger(quantity)) {
+        return { success: false, reason: 'Quantity must be a positive integer' };
+      }
+
+      if (!Number.isFinite(price) || price <= 0) {
+        return { success: false, reason: 'Price must be a positive number' };
+      }
+
       const cost = quantity * price;
 
-      if (side === 'BUY') {
+      if (normalizedSide === 'BUY') {
         if (this.cash < cost) return { success: false, reason: 'Insufficient cash' };
         this.cash -= cost;
         this.portfolio[symbol] = (this.portfolio[symbol] || 0) + quantity;
         this.trades.push({ timestamp: new Date().toISOString(), side: 'BUY', quantity, price, cost });
-      } else if (side === 'SELL') {
+      } else if (normalizedSide === 'SELL') {
         if ((this.portfolio[symbol] || 0) < quantity) {
           return { success: false, reason: 'Insufficient shares' };
         }
@@ -67,10 +127,15 @@ class BacktestEngine {
 
     for (const candle of historicalData) {
       try {
-        strategy(candle, this.portfolio, this.cash, executeOrder);
+        const sandbox = {
+          data: Object.freeze({ ...candle }),
+          portfolio: Object.freeze({ ...this.portfolio }),
+          cash: this.cash,
+          executeOrder
+        };
+        strategyScript.runInNewContext(sandbox, { timeout: STRATEGY_TIMEOUT_MS });
       } catch (err) {
-        console.error('Strategy error:', err);
-        break;
+        return { error: `Strategy runtime error: ${err.message}` };
       }
 
       const portfolioValue = Object.values(this.portfolio).reduce((sum, qty) => sum + qty * candle.close, 0);

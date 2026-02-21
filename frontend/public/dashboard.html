@@ -419,7 +419,17 @@ async function loadStrategies() {
     state.strategies.forEach(s => {
       const d = document.createElement('div');
       d.className = 'item';
-      d.innerHTML = `<strong>${s.name}</strong> <span class="muted">(${s.symbol})</span><div class="muted">${s.description || ''}</div>`;
+      const title = document.createElement('strong');
+      title.textContent = s.name;
+      const symbolSpan = document.createElement('span');
+      symbolSpan.className = 'muted';
+      symbolSpan.textContent = ` (${s.symbol})`;
+      const desc = document.createElement('div');
+      desc.className = 'muted';
+      desc.textContent = s.description || '';
+      d.appendChild(title);
+      d.appendChild(symbolSpan);
+      d.appendChild(desc);
       list.appendChild(d);
 
       const o = document.createElement('option');
@@ -500,7 +510,15 @@ async function loadOrders() {
     orders.forEach(o => {
       const d = document.createElement('div');
       d.className = 'item';
-      d.innerHTML = `<strong>${o.side}</strong> ${o.quantity} ${o.symbol} @ ${money(o.price)} <span class="muted">${o.status}</span>`;
+      const side = document.createElement('strong');
+      side.textContent = o.side;
+      const details = document.createTextNode(` ${o.quantity} ${o.symbol} @ ${money(o.price)} `);
+      const status = document.createElement('span');
+      status.className = 'muted';
+      status.textContent = o.status;
+      d.appendChild(side);
+      d.appendChild(details);
+      d.appendChild(status);
       list.appendChild(d);
     });
   } catch (e) {

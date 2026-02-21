@@ -14,7 +14,8 @@ const app = express();
 const server = createServer(app);
 const wss = new WebSocketServer({ server });
 
-const JWT_SECRET = process.env.JWT_SECRET || 'dev-jwt-secret-change-in-production';
+const DEV_JWT_SECRET = 'dev-jwt-secret-change-in-production';
+const JWT_SECRET = process.env.JWT_SECRET || DEV_JWT_SECRET;
 const JWT_EXPIRES_IN = '7d';
 const APP_URL = process.env.APP_URL || 'http://localhost:8081';
 
@@ -52,7 +53,78 @@ redisClient.connect().catch((err) => console.log('Redis connect warning:', err.m
 const clients = new Set();
 let prices = { AAPL: 150.25, GOOGL: 140.8, MSFT: 380.5, AMZN: 175.3 };
 
-app.use(cors());
+const allowedOrigins = new Set(
+  (process.env.CORS_ORIGINS || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean)
+);
+if (!allowedOrigins.size) {
+  allowedOrigins.add(APP_URL);
+  allowedOrigins.add('http://localhost:8081');
+  allowedOrigins.add('http://127.0.0.1:8081');
+}
+
+app.use(cors({
+  origin(origin, callback) {
+    if (!origin || allowedOrigins.has(origin)) return callback(null, true);
+    return callback(new Error('Origin not allowed by CORS'));
+  }
+}));
+
+function normalizeSymbol(symbol) {
+  return String(symbol || '').trim().toUpperCase();
+}
+
+function isValidSymbol(symbol) {
+  return /^[A-Z]{1,10}$/.test(symbol);
+}
+
+function parseBacktestDays(value, fallback = 30) {
+  const raw = value == null ? fallback : value;
+  const days = Number(raw);
+  if (!Number.isInteger(days) || days < 1 || days > 365) return null;
+  return days;
+}
+
+function validateStrategyInput({ name, code, symbol }) {
+  if (typeof name !== 'string' || !name.trim()) return 'name is required';
+  if (name.trim().length > 120) return 'name too long (max 120 chars)';
+
+  if (typeof code !== 'string' || !code.trim()) return 'code is required';
+  if (code.length > 10000) return 'code too long (max 10000 chars)';
+
+  const normalizedSymbol = normalizeSymbol(symbol);
+  if (!isValidSymbol(normalizedSymbol)) return 'symbol must be 1-10 uppercase letters';
+
+  const codeValidation = BacktestEngine.validateStrategyCode(code);
+  if (!codeValidation.valid) return codeValidation.error;
+
+  return null;
+}
+
+function validateOrderInput({ symbol, quantity, price, side }) {
+  const normalizedSymbol = normalizeSymbol(symbol);
+  const normalizedSide = String(side || '').toUpperCase();
+  const normalizedQuantity = Number(quantity);
+  const normalizedPrice = Number(price);
+
+  if (!isValidSymbol(normalizedSymbol)) return { error: 'symbol must be 1-10 uppercase letters' };
+  if (!['BUY', 'SELL'].includes(normalizedSide)) return { error: 'side must be BUY or SELL' };
+  if (!Number.isInteger(normalizedQuantity) || normalizedQuantity <= 0) {
+    return { error: 'quantity must be a positive integer' };
+  }
+  if (!Number.isFinite(normalizedPrice) || normalizedPrice <= 0) {
+    return { error: 'price must be a positive number' };
+  }
+
+  return {
+    symbol: normalizedSymbol,
+    side: normalizedSide,
+    quantity: normalizedQuantity,
+    price: normalizedPrice
+  };
+}
 
 function signToken(user) {
   return jwt.sign(
@@ -464,7 +536,9 @@ app.get('/api/billing/status', requireAuth, async (req, res) => {
 app.post('/api/strategies', requireAuth, async (req, res) => {
   try {
     const { name, description, code, symbol } = req.body;
-    if (!name || !code || !symbol) return res.status(400).json({ error: 'name, code, symbol are required' });
+    const validationError = validateStrategyInput({ name, code, symbol });
+    if (validationError) return res.status(400).json({ error: validationError });
+    const normalizedSymbol = normalizeSymbol(symbol);
 
     const user = await loadCurrentUser(req.user.id);
     if (!user) return res.status(404).json({ error: 'User not found' });
@@ -482,7 +556,7 @@ app.post('/api/strategies', requireAuth, async (req, res) => {
     const result = await pool.query(
       `INSERT INTO strategies (user_id, name, description, code, symbol, created_at)
        VALUES ($1, $2, $3, $4, $5, NOW()) RETURNING *`,
-      [user.id, name, description || '', code, symbol.toUpperCase()]
+      [user.id, name.trim(), String(description || '').trim(), code, normalizedSymbol]
     );
     return res.status(201).json({ success: true, strategy: result.rows[0] });
   } catch (err) {
@@ -533,11 +607,24 @@ app.put('/api/strategies/:id', requireAuth, async (req, res) => {
     if (!strategy) return res.status(404).json({ error: 'Not found' });
 
     const { name, description, code, symbol } = req.body;
+    const nextName = name == null ? strategy.name : name;
+    const nextCode = code == null ? strategy.code : code;
+    const nextSymbol = symbol == null ? strategy.symbol : symbol;
+    const validationError = validateStrategyInput({ name: nextName, code: nextCode, symbol: nextSymbol });
+    if (validationError) return res.status(400).json({ error: validationError });
+
     const result = await pool.query(
       `UPDATE strategies SET name = $1, description = $2, code = $3, symbol = $4, updated_at = NOW()
        WHERE id = $5 AND user_id = $6
        RETURNING *`,
-      [name || strategy.name, description || strategy.description, code || strategy.code, (symbol || strategy.symbol).toUpperCase(), req.params.id, req.user.id]
+      [
+        String(nextName).trim(),
+        description == null ? strategy.description : String(description).trim(),
+        nextCode,
+        normalizeSymbol(nextSymbol),
+        req.params.id,
+        req.user.id
+      ]
     );
     return res.json({ success: true, strategy: result.rows[0] });
   } catch (err) {
@@ -559,6 +646,10 @@ app.post('/api/backtest', requireAuth, async (req, res) => {
   try {
     const { strategy_id, days = 30 } = req.body;
     if (!strategy_id) return res.status(400).json({ error: 'strategy_id is required' });
+    const normalizedDays = parseBacktestDays(days);
+    if (normalizedDays == null) {
+      return res.status(400).json({ error: 'days must be an integer between 1 and 365' });
+    }
 
     const user = await loadCurrentUser(req.user.id);
     if (!user) return res.status(404).json({ error: 'User not found' });
@@ -580,7 +671,7 @@ app.post('/api/backtest', requireAuth, async (req, res) => {
     if (!strategy) return res.status(404).json({ error: 'Strategy not found' });
 
     const engine = new BacktestEngine();
-    const result = await engine.runBacktest(strategy.code, strategy.symbol, days);
+    const result = await engine.runBacktest(strategy.code, strategy.symbol, normalizedDays);
     if (result.error) return res.status(400).json(result);
 
     await pool.query(
@@ -618,14 +709,13 @@ app.get('/api/backtests/:strategy_id', requireAuth, async (req, res) => {
 app.post('/api/orders', requireAuth, async (req, res) => {
   try {
     const { symbol, quantity, price, side } = req.body;
-    if (!symbol || !quantity || !price || !side) {
-      return res.status(400).json({ error: 'symbol, quantity, price, side are required' });
-    }
+    const orderValidation = validateOrderInput({ symbol, quantity, price, side });
+    if (orderValidation.error) return res.status(400).json({ error: orderValidation.error });
 
     const result = await pool.query(
       `INSERT INTO orders (user_id, symbol, quantity, price, side, status, created_at)
        VALUES ($1, $2, $3, $4, $5, $6, NOW()) RETURNING *`,
-      [req.user.id, symbol.toUpperCase(), quantity, price, side, 'PENDING']
+      [req.user.id, orderValidation.symbol, orderValidation.quantity, orderValidation.price, orderValidation.side, 'PENDING']
     );
     return res.status(201).json({ success: true, order: result.rows[0] });
   } catch (err) {
@@ -688,6 +778,12 @@ app.get('/health', (_req, res) => {
 
 async function start() {
   try {
+    if (process.env.NODE_ENV === 'production') {
+      if (JWT_SECRET === DEV_JWT_SECRET || JWT_SECRET.length < 32) {
+        throw new Error('Set a strong JWT_SECRET (at least 32 characters) in production');
+      }
+    }
+
     await ensureSchema();
     broadcastPrices();
     const PORT = process.env.PORT || 3000;
