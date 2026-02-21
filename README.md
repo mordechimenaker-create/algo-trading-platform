@@ -96,6 +96,9 @@ See `docs/LOAD_TESTING.md`.
 ## PWA App Install
 See `docs/PWA.md` to install the dashboard as a web app on desktop/mobile.
 
+## Windows EXE
+See `docs/EXE_BUILD.md` to build a Windows `.exe` desktop wrapper.
+
 ## Live Simulation Docs
 See `docs/LIVE_SIMULATION.md` for:
 - WebSocket feed format

@@ -25,3 +25,5 @@ dist/
 build/
 .tmp/
 tmp/
+releases/*.zip
+releases/*.tar.gz
