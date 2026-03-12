@@ -42,7 +42,7 @@ jobs:
             type=sha
 
       - name: Build and push (GHCR)
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: ./backend
           file: ./backend/Dockerfile
@@ -69,7 +69,7 @@ jobs:
 
       - name: Build and push (Docker Hub)
         if: ${{ env.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_TOKEN != '' }}
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: ./backend
           file: ./backend/Dockerfile
