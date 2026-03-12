@@ -34,7 +34,7 @@ jobs:
 
       - name: Extract metadata (GHCR)
         id: meta_ghcr
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ${{ env.GHCR_IMAGE }}
           tags: |
@@ -60,7 +60,7 @@ jobs:
       - name: Extract metadata (Docker Hub)
         if: ${{ env.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_TOKEN != '' }}
         id: meta_dh
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ${{ env.DOCKERHUB_USERNAME }}/algo-trading-backend
           tags: |
