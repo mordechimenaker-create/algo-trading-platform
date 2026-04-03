@@ -9,7 +9,7 @@
     "desktop:pack": "electron-builder --win portable"
   },
   "devDependencies": {
-    "electron": "^37.2.0",
+    "electron": "^39.8.5",
     "electron-builder": "^25.1.8"
   },
   "build": {
